@@ -11,8 +11,8 @@
 
 #include "err.h"
 
-// #define BLOCK_SIZE (8 * 1024 * 1024) // 8MB
-#define BLOCK_SIZE (4096) // 4KB
+#define BLOCK_SIZE (8 * 1024 * 1024) // 8MB
+// #define BLOCK_SIZE (4096) // 4KB
 #define CRC64_ECMA182_POLY 0x42F0E1EBA9EA3693ULL
 
 static uint64_t crc64_table[256] = {0};
@@ -69,7 +69,8 @@ uint64_t sequential_read(const char *filename, double *time_taken) {
     ASSERT_ZERO(clock_gettime(CLOCK_MONOTONIC, &start));
 
     while ((bytes_read = read(fd, buffer, BLOCK_SIZE)) > 0) {
-        crc = crc64_be(crc, buffer, bytes_read);
+        uint64_t block_crc = crc64_be(0, buffer, bytes_read);
+        crc ^= block_crc;
     }
     
     ASSERT_ZERO(clock_gettime(CLOCK_MONOTONIC, &end)); // CLOCK_REALTIME
@@ -94,45 +95,51 @@ uint64_t random_read(const char *filename, double *time_taken) {
     uint64_t crc = 0;
     struct stat st;
     off_t file_size;
-    off_t front_offset = 0, back_offset;
+    off_t front_block = 0, back_block;
     int read_from_front = 1;
+    off_t total_blocks;
     
-
     buffer = malloc(BLOCK_SIZE);
     ASSERT_NOT_NULL(buffer);
         
     fd = open(filename, O_RDONLY);
-
     ASSERT_SYS_OK(fd);
     ASSERT_ZERO(fstat(fd, &st));
     
     file_size = st.st_size;
-    back_offset = file_size;
+
+    total_blocks = (file_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    back_block = total_blocks - 1;
 
     ASSERT_ZERO(clock_gettime(CLOCK_MONOTONIC, &start));
 
-    while (front_offset < back_offset) {
+    while (front_block <= back_block) {
+        off_t current_block;
+        off_t offset;
+        size_t to_read;
+        
         if (read_from_front) {
-            lseek(fd, front_offset, SEEK_SET);
-            size_t to_read = (front_offset + BLOCK_SIZE <= back_offset) ? 
-                            BLOCK_SIZE : (back_offset - front_offset);
-            bytes_read = read(fd, buffer, to_read);
-            if (bytes_read > 0) {
-                crc = crc64_be(crc, buffer, bytes_read);
-                front_offset += bytes_read;
-            }
+            current_block = front_block;
+            front_block++;
         } else {
-            size_t to_read = (back_offset - front_offset >= BLOCK_SIZE) ? 
-                            BLOCK_SIZE : (back_offset - front_offset);
-            back_offset -= to_read;
-            lseek(fd, back_offset, SEEK_SET);
-            bytes_read = read(fd, buffer, to_read);
-            if (bytes_read > 0) {
-                crc = crc64_be(crc, buffer, bytes_read);
-            }
+            current_block = back_block;
+            back_block--;
         }
         
-        if (bytes_read <= 0) break;
+        offset = current_block * BLOCK_SIZE;
+        to_read = (offset + BLOCK_SIZE <= file_size) ? 
+                  BLOCK_SIZE : (file_size - offset);
+        
+        lseek(fd, offset, SEEK_SET);
+        bytes_read = read(fd, buffer, to_read);
+        
+        if (bytes_read > 0) {
+            uint64_t block_crc = crc64_be(0, buffer, bytes_read);
+            crc ^= block_crc;
+        } else {
+            break;
+        }
+        
         read_from_front = !read_from_front;
     }
 
@@ -145,6 +152,7 @@ uint64_t random_read(const char *filename, double *time_taken) {
     
     return crc;
 }
+
 
 uint64_t sequential_mmap(const char *filename, double *time_taken) {
     struct timespec start, end;
@@ -171,9 +179,10 @@ uint64_t sequential_mmap(const char *filename, double *time_taken) {
             perror("mmap");
             break;
         }
-        
-        crc = crc64_be(crc, (unsigned char *)mapped, map_size);
-        
+
+        uint64_t block_crc = crc64_be(0, (unsigned char *)mapped, map_size);
+        crc ^= block_crc;
+
         ASSERT_SYS_OK(munmap(mapped, map_size));
         offset += map_size;
     }
@@ -193,41 +202,45 @@ uint64_t random_mmap(const char *filename, double *time_taken) {
     struct stat st;
     off_t file_size;
     uint64_t crc = 0;
+    off_t front_block = 0, back_block;
+    int read_from_front = 1;
+    off_t total_blocks;
     
     fd = open(filename, O_RDONLY);
-
     ASSERT_SYS_OK(fd);
     ASSERT_ZERO(fstat(fd, &st));
     
     file_size = st.st_size;
+    total_blocks = (file_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    back_block = total_blocks - 1;
+    
     ASSERT_ZERO(clock_gettime(CLOCK_MONOTONIC, &start));
     
-    off_t front_offset = 0, back_offset = file_size;
-    int read_from_front = 1;
-    
-    while (front_offset < back_offset) {
+    while (front_block <= back_block) {
+        off_t current_block;
         off_t offset;
         size_t map_size;
         
         if (read_from_front) {
-            offset = front_offset;
-            map_size = (front_offset + BLOCK_SIZE <= back_offset) ? 
-                      BLOCK_SIZE : (back_offset - front_offset);
-            front_offset += map_size;
+            current_block = front_block;
+            front_block++;
         } else {
-            map_size = (back_offset - front_offset >= BLOCK_SIZE) ? 
-                      BLOCK_SIZE : (back_offset - front_offset);
-            back_offset -= map_size;
-            offset = back_offset;
+            current_block = back_block;
+            back_block--;
         }
+        
+        offset = current_block * BLOCK_SIZE;
+        map_size = (offset + BLOCK_SIZE <= file_size) ? 
+                   BLOCK_SIZE : (file_size - offset);
         
         void *mapped = mmap(NULL, map_size, PROT_READ, MAP_PRIVATE, fd, offset);
         if (mapped == MAP_FAILED) {
             perror("mmap");
             break;
         }
-        
-        crc = crc64_be(crc, (unsigned char *)mapped, map_size);
+
+        uint64_t block_crc = crc64_be(0, (unsigned char *)mapped, map_size);
+        crc ^= block_crc;
 
         ASSERT_SYS_OK(munmap(mapped, map_size));
         read_from_front = !read_from_front;
@@ -236,12 +249,10 @@ uint64_t random_mmap(const char *filename, double *time_taken) {
     ASSERT_ZERO(clock_gettime(CLOCK_MONOTONIC, &end));
 
     *time_taken = get_time_diff(start, end);
-
     ASSERT_SYS_OK(close(fd));
 
     return crc;
 }
-
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         fprintf(stderr, "Użycie: %s <nazwa_pliku>\n", argv[0]);

@@ -11,8 +11,8 @@
 
 #include "err.h"
 
-#define BLOCK_SIZE (8 * 1024 * 1024) // 8MB
-// #define BLOCK_SIZE (4096) // 4KB
+#define BLOCK_SIZE (8 * 1024 * 1024)
+
 #define CRC64_ECMA182_POLY 0x42F0E1EBA9EA3693ULL
 
 static uint64_t crc64_table[256] = {0};
@@ -73,7 +73,7 @@ uint64_t sequential_read(const char *filename, double *time_taken) {
         crc ^= block_crc;
     }
     
-    ASSERT_ZERO(clock_gettime(CLOCK_MONOTONIC, &end)); // CLOCK_REALTIME
+    ASSERT_ZERO(clock_gettime(CLOCK_MONOTONIC, &end));
     
 
     ASSERT_SYS_OK(bytes_read);
@@ -255,7 +255,7 @@ uint64_t random_mmap(const char *filename, double *time_taken) {
 }
 int main(int argc, char *argv[]) {
     if (argc != 2) {
-        fprintf(stderr, "Użycie: %s <nazwa_pliku>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return 1;
     }
 
@@ -264,40 +264,25 @@ int main(int argc, char *argv[]) {
     const char *filename = argv[1];
     double time_seq_read, time_rand_read, time_seq_mmap, time_rand_mmap;
     uint64_t crc_seq_read, crc_rand_read, crc_seq_mmap, crc_rand_mmap;
-    
-    printf("Plik: %s\n", filename);
-    // printf("Rozmiar bloku: %d MB\n\n", BLOCK_SIZE / (1024 * 1024));
-    
-    // 1. Sekwencyjny read()
-    printf("1. Sekwencyjny odczyt (read)...\n");
+        
+    printf("1. Sequential read\n");
     crc_seq_read = sequential_read(filename, &time_seq_read);
-    printf("   Czas: %.6f s\n", time_seq_read);
+    printf("   Time: %.6f s\n", time_seq_read);
     printf("   CRC64: 0x%016lX\n\n", crc_seq_read);
     
-    // 2. Losowy read()
-    printf("2. Losowy odczyt (read)...\n");
+    printf("2. Random read\n");
     crc_rand_read = random_read(filename, &time_rand_read);
-    printf("   Czas: %.6f s\n", time_rand_read);
+    printf("   Time: %.6f s\n", time_rand_read);
     printf("   CRC64: 0x%016lX\n\n", crc_rand_read);
     
-    // 3. Sekwencyjny mmap()
-    printf("3. Sekwencyjny odczyt (mmap)...\n");
+    printf("3. Sequential mmap\n");
     crc_seq_mmap = sequential_mmap(filename, &time_seq_mmap);
-    printf("   Czas: %.6f s\n", time_seq_mmap);
+    printf("   Time: %.6f s\n", time_seq_mmap);
     printf("   CRC64: 0x%016lX\n\n", crc_seq_mmap);
     
-    // 4. Losowy mmap()
-    printf("4. Losowy odczyt (mmap)...\n");
+    printf("4. Random mmap\n");
     crc_rand_mmap = random_mmap(filename, &time_rand_mmap);
-    printf("   Czas: %.6f s\n", time_rand_mmap);
-    printf("   CRC64: 0x%016lX\n\n", crc_rand_mmap);
-    
-    // Podsumowanie
-    // printf("=== PODSUMOWANIE ===\n");
-    // printf("Wszystkie sumy CRC64 %s\n", 
-    //        (crc_seq_read == crc_rand_read && 
-    //         crc_rand_read == crc_seq_mmap && 
-    //         crc_seq_mmap == crc_rand_mmap) ? "SĄ ZGODNE ✓" : "NIE SĄ ZGODNE ✗");
-    
+    printf("   Time: %.6f s\n", time_rand_mmap);
+    printf("   CRC64: 0x%016lX\n\n", crc_rand_mmap);    
     return 0;
 }

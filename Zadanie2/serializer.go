@@ -26,10 +26,7 @@ func NewSerializer(tablePath string, numRows int32, numColumns int32) (*Serializ
 	}, nil
 }
 
-func (s *Serializer) WriteBatch(batchIndex int, columns []interface{}) error {
-	if len(columns) != int(s.numColumns) {
-		return fmt.Errorf("expected %d columns, got %d", s.numColumns, len(columns))
-	}
+func (s *Serializer) WriteBatch(batchIndex int, batch *Batch) error {
 
 	var batchFile string
 	var index int = batchIndex
@@ -45,8 +42,8 @@ func (s *Serializer) WriteBatch(batchIndex int, columns []interface{}) error {
 	defer file.Close()
 
 	header := FileHeader{
-		BatchSize:    s.numRows,
-		NumColumns:   s.numColumns,
+		BatchSize:    batch.BatchSize,
+		NumColumns:   batch.NumColumns,
 		FooterOffset: 0,
 	}
 	if err := s.writeHeader(file, header); err != nil {
@@ -54,13 +51,24 @@ func (s *Serializer) WriteBatch(batchIndex int, columns []interface{}) error {
 	}
 
 	currentOffset := int64(HeaderSize)
-	columnFooters := make([]ColumnFooter, s.numColumns)
+	columnFooters := make([]ColumnFooter, batch.NumColumns)
 
-	for i, col := range columns {
-		switch v := col.(type) {
-		case []int64:
+	for i := 0; i < int(batch.NumColumns); i++ {
 
-			compressed, min := utils.CompressIntegers(v)
+		colData := make([]interface{}, batch.BatchSize)
+		for r := 0; r < int(batch.BatchSize); r++ {
+			colData[r] = batch.Data[i][r]
+		}
+
+		switch colData[0].(type) {
+		case int64:
+
+			ints := make([]int64, len(colData))
+			for j, val := range colData {
+				ints[j] = val.(int64)
+			}
+
+			compressed, min := utils.CompressIntegers(ints)
 
 			n, err := file.Write(compressed)
 			if err != nil {
@@ -76,17 +84,21 @@ func (s *Serializer) WriteBatch(batchIndex int, columns []interface{}) error {
 
 			currentOffset += int64(n)
 
-		case []string:
+		case string:
 
-			blob, offsets := utils.BuildConcatenatedBlob(v)
+			strs := make([]string, len(colData))
+			for j, val := range colData {
+				strs[j] = val.(string)
+			}
 
+			blob, offsets := utils.BuildConcatenatedBlob(strs)
 			compressedOffsets, min := utils.CompressIntegers(offsets)
 
+			// write compressed offsets
 			n1, err := file.Write(compressedOffsets)
 			if err != nil {
 				return err
 			}
-
 			columnOffset := currentOffset
 			currentOffset += int64(n1)
 
@@ -112,7 +124,7 @@ func (s *Serializer) WriteBatch(batchIndex int, columns []interface{}) error {
 			currentOffset += int64(n2)
 
 		default:
-			return fmt.Errorf("column %d: unsupported type %T", i, col)
+			return fmt.Errorf("column %d: unsupported type %T", i, colData[0])
 		}
 	}
 

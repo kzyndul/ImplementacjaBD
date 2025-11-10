@@ -18,36 +18,97 @@ type Column struct {
 	StrData []string // Used if Type == TypeString
 }
 
-type Batch struct {
-	NumRows int32
-	Columns []Column
-}
-
 // type Batch struct {
-// 	NumRows     int32        // Number of rows in the batch
-// 	NumColumns  int32        // Number of columns
-// 	ColumnTypes []byte       // Type of each column (TypeInt or TypeString)
-// 	Data        [][]byte     // 2D array where each column is a contiguous byte slice
+// 	NumRows int32
+// 	Columns []Column
 // }
 
-func (b *Batch) GetIntColumn(colIndex int) ([]int64, error) {
-	if colIndex < 0 || colIndex >= len(b.Columns) {
-		return nil, fmt.Errorf("column index %d out of bounds", colIndex)
-	}
-	if b.Columns[colIndex].Type != TypeInt {
-		return nil, fmt.Errorf("column %d is not an integer column", colIndex)
-	}
-	return b.Columns[colIndex].IntData, nil
+type Batch struct {
+	BatchSize   int32
+	NumColumns  int32
+	ColumnTypes []byte
+	Data        [][]interface{} // rows × columns
 }
 
-func (b *Batch) GetStringColumn(colIndex int) ([]string, error) {
-	if colIndex < 0 || colIndex >= len(b.Columns) {
-		return nil, fmt.Errorf("column index %d out of bounds", colIndex)
+// NewBatch creates batches from columns, splitting them into chunks of batchSize.
+// Each argument should be either []int64 or []string. All columns must have the same length.
+// Returns an array of batches where each batch has batchSize rows (except the last which may be smaller).
+func NewBatch(batchSize int32, cols ...interface{}) ([]*Batch, error) {
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("no columns provided")
 	}
-	if b.Columns[colIndex].Type != TypeString {
-		return nil, fmt.Errorf("column %d is not a string column", colIndex)
+	if batchSize <= 0 {
+		return nil, fmt.Errorf("batch size must be positive")
 	}
-	return b.Columns[colIndex].StrData, nil
+
+	// Determine total number of rows from first column
+	var totalRows int32
+	switch v := cols[0].(type) {
+	case []int64:
+		totalRows = int32(len(v))
+	case []string:
+		totalRows = int32(len(v))
+	default:
+		return nil, fmt.Errorf("unsupported column type %T", v)
+	}
+
+	// Validate all columns same length and determine types
+	columnTypes := make([]byte, len(cols))
+	for i, c := range cols {
+		var colLen int32
+		switch col := c.(type) {
+		case []int64:
+			colLen = int32(len(col))
+			columnTypes[i] = TypeInt
+		case []string:
+			colLen = int32(len(col))
+			columnTypes[i] = TypeString
+		default:
+			return nil, fmt.Errorf("unsupported column type at %d: %T", i, c)
+		}
+		if colLen != totalRows {
+			return nil, fmt.Errorf("column %d length mismatch: %d != %d", i, colLen, totalRows)
+		}
+	}
+
+	// Calculate number of batches needed
+	numBatches := (totalRows + batchSize - 1) / batchSize
+	batches := make([]*Batch, 0, numBatches)
+
+	// Create batches
+	for batchIdx := int32(0); batchIdx < numBatches; batchIdx++ {
+		startRow := batchIdx * batchSize
+		endRow := startRow + batchSize
+		if endRow > totalRows {
+			endRow = totalRows
+		}
+		currentBatchSize := endRow - startRow
+
+		// Allocate data for this batch
+		data := make([][]interface{}, len(cols))
+		for colIdx, c := range cols {
+			data[colIdx] = make([]interface{}, currentBatchSize)
+			switch col := c.(type) {
+			case []int64:
+				for r := int32(0); r < currentBatchSize; r++ {
+					data[colIdx][r] = col[startRow+r]
+				}
+			case []string:
+				for r := int32(0); r < currentBatchSize; r++ {
+					data[colIdx][r] = col[startRow+r]
+				}
+			}
+		}
+
+		batches = append(batches, &Batch{
+			BatchSize:   int32(currentBatchSize),
+			NumColumns:  int32(len(cols)),
+			ColumnTypes: columnTypes,
+			Data:        data,
+		})
+	}
+
+	return batches, nil
 }
 
 func NewBatchDeserializer(tablePath string) (*Deserializer, error) {
@@ -74,14 +135,20 @@ func (d *Deserializer) ReadBatch(batchIndex int) (*Batch, error) {
 		return nil, err
 	}
 
-	batch := &Batch{
-		NumRows: header.BatchSize,
-		Columns: make([]Column, header.NumColumns),
+	numRows := header.BatchSize
+	numCols := header.NumColumns
+	data := make([][]interface{}, numCols)
+	for r := int32(0); r < numCols; r++ {
+		data[r] = make([]interface{}, numRows)
 	}
+
+	columnTypes := make([]byte, numCols)
 
 	currentOffset := int64(HeaderSize)
 
 	for i, cf := range columnFooters {
+		columnTypes[i] = cf.Type
+
 		var nextOffset int64
 		if i == len(columnFooters)-1 {
 			nextOffset = header.FooterOffset
@@ -91,7 +158,6 @@ func (d *Deserializer) ReadBatch(batchIndex int) (*Batch, error) {
 
 		switch cf.Type {
 		case TypeInt:
-
 			compressedSize := nextOffset - currentOffset
 			compressedData := make([]byte, compressedSize)
 
@@ -100,31 +166,20 @@ func (d *Deserializer) ReadBatch(batchIndex int) (*Batch, error) {
 			}
 
 			values := utils.DecompressIntegers(compressedData, cf.Delta)
-
-			batch.Columns[i] = Column{
-				Type:    TypeInt,
-				IntData: values,
+			for r := range values {
+				data[i][r] = values[r]
 			}
 
 		case TypeString:
-
-			var dataOffset int64 = cf.DataOffset
-
-			arrayOffsetsSize := dataOffset - currentOffset
-			compressedOffsets := make([]byte, arrayOffsetsSize)
-
-			// offsetsSize := cf.DataOffset - currentOffset
-			// compressedOffsets := make([]byte, offsetsSize)
-
+			offsetsSize := cf.DataOffset - currentOffset
+			compressedOffsets := make([]byte, offsetsSize)
 			if _, err := file.ReadAt(compressedOffsets, currentOffset); err != nil {
 				return nil, err
 			}
-
 			offsets := utils.DecompressIntegers(compressedOffsets, cf.Delta)
 
 			compressedStringsSize := nextOffset - cf.DataOffset
 			compressedStrings := make([]byte, compressedStringsSize)
-
 			if _, err := file.ReadAt(compressedStrings, cf.DataOffset); err != nil {
 				return nil, err
 			}
@@ -134,21 +189,25 @@ func (d *Deserializer) ReadBatch(batchIndex int) (*Batch, error) {
 				return nil, err
 			}
 
-			strings := utils.DecompressStrings(decompressedStrings, offsets)
+			strs := utils.DecompressStrings(decompressedStrings, offsets)
 
-			batch.Columns[i] = Column{
-				Type:    TypeString,
-				StrData: strings,
+			for r := range strs {
+				data[i][r] = strs[r]
 			}
 
 		default:
-			return nil, fmt.Errorf("unknown column type: %d", cf.Type)
+			return nil, fmt.Errorf("unknown column type %d", cf.Type)
 		}
-		currentOffset = nextOffset
 
+		currentOffset = nextOffset
 	}
 
-	return batch, nil
+	return &Batch{
+		BatchSize:   numRows,
+		NumColumns:  numCols,
+		ColumnTypes: columnTypes,
+		Data:        data,
+	}, nil
 }
 
 func (d *Deserializer) readHeader(file *os.File) (*FileHeader, error) {

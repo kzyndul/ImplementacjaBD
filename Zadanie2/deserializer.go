@@ -30,9 +30,6 @@ type Batch struct {
 	Data        [][]interface{} // rows × columns
 }
 
-// NewBatch creates batches from columns, splitting them into chunks of batchSize.
-// Each argument should be either []int64 or []string. All columns must have the same length.
-// Returns an array of batches where each batch has batchSize rows (except the last which may be smaller).
 func NewBatch(batchSize int32, cols ...interface{}) ([]*Batch, error) {
 	if len(cols) == 0 {
 		return nil, fmt.Errorf("no columns provided")
@@ -41,7 +38,6 @@ func NewBatch(batchSize int32, cols ...interface{}) ([]*Batch, error) {
 		return nil, fmt.Errorf("batch size must be positive")
 	}
 
-	// Determine total number of rows from first column
 	var totalRows int32
 	switch v := cols[0].(type) {
 	case []int64:
@@ -52,7 +48,6 @@ func NewBatch(batchSize int32, cols ...interface{}) ([]*Batch, error) {
 		return nil, fmt.Errorf("unsupported column type %T", v)
 	}
 
-	// Validate all columns same length and determine types
 	columnTypes := make([]byte, len(cols))
 	for i, c := range cols {
 		var colLen int32
@@ -71,11 +66,9 @@ func NewBatch(batchSize int32, cols ...interface{}) ([]*Batch, error) {
 		}
 	}
 
-	// Calculate number of batches needed
 	numBatches := (totalRows + batchSize - 1) / batchSize
 	batches := make([]*Batch, 0, numBatches)
 
-	// Create batches
 	for batchIdx := int32(0); batchIdx < numBatches; batchIdx++ {
 		startRow := batchIdx * batchSize
 		endRow := startRow + batchSize
@@ -84,7 +77,6 @@ func NewBatch(batchSize int32, cols ...interface{}) ([]*Batch, error) {
 		}
 		currentBatchSize := endRow - startRow
 
-		// Allocate data for this batch
 		data := make([][]interface{}, len(cols))
 		for colIdx, c := range cols {
 			data[colIdx] = make([]interface{}, currentBatchSize)

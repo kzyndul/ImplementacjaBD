@@ -94,7 +94,6 @@ func (s *Serializer) WriteBatch(batchIndex int, batch *Batch) error {
 			blob, offsets := utils.BuildConcatenatedBlob(strs)
 			compressedOffsets, min := utils.CompressIntegers(offsets)
 
-			// write compressed offsets
 			n1, err := file.Write(compressedOffsets)
 			if err != nil {
 				return err

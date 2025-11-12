@@ -4,19 +4,22 @@
 
 ## Kompilacja
 
-Każda kolumna w oddzielnym pliku, mam
-
-heder stałej długości np typ, pliku, długość batcha, gdzie zaczyna się footer
-
-footer: dla każdego batcha informacje potrzebne do dekompresji i miejsce w którym sie zaczyna 
+run 
 
 
-dla napisów trzymam diwe wartosci tablice offsetów gdzie zaczyna sie konkretny napis + ostatni napis długość całkowita danych i druga wartosć to jest concatenacja 
-wszystkich napisów w batchu do jednego poprzedzielana czyms zeby wiadomo gdzie jest koniec.
+Format pliku:
+- Nagłówek pliku: 
+    - BatchSize - ilość wierszy w tym pliku
+    - NumColumns - ikość kolumn w tym pliku
+    - FooterOffset
 
+- Dane
 
+- Stopka pliku: dla każdego kolumny informacja:
+    - Jakiego typu jest ta kolumna
+    - Jaka jest warotść najmniejsze liczby w tablicy intów
+    - Miejsce w ktorym zaczynaj sie skompresowana tablica intów
+    - Miejsce w ktorym zaczynaja sie skompresowana tablca stringów lub 0 jezeli typ to int
 
-
-
-Nagłówek pliku, typ, 
-    
+## Kompresja
+Do kompresji Intów używany jest delta enkoding połaczony z VLT. Dla napisów: cała tablica jest konkatenowana w jeden długi napis oddzielany "\0" i dla każdego elemenetu zapamiętywany jest ofset na kórej pozycji zaczyna się on w tym skonkatenowanym napisie.

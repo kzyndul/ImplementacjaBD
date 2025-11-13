@@ -12,97 +12,6 @@ type Deserializer struct {
 	tablePath string
 }
 
-type Column struct {
-	Type    byte     // TypeInt or TypeString
-	IntData []int64  // Used if Type == TypeInt
-	StrData []string // Used if Type == TypeString
-}
-
-// type Batch struct {
-// 	NumRows int32
-// 	Columns []Column
-// }
-
-type Batch struct {
-	BatchSize   int32
-	NumColumns  int32
-	ColumnTypes []byte
-	Data        [][]interface{} // rows × columns
-}
-
-func NewBatch(batchSize int32, cols ...interface{}) ([]*Batch, error) {
-	if len(cols) == 0 {
-		return nil, fmt.Errorf("no columns provided")
-	}
-	if batchSize <= 0 {
-		return nil, fmt.Errorf("batch size must be positive")
-	}
-
-	var totalRows int32
-	switch v := cols[0].(type) {
-	case []int64:
-		totalRows = int32(len(v))
-	case []string:
-		totalRows = int32(len(v))
-	default:
-		return nil, fmt.Errorf("unsupported column type %T", v)
-	}
-
-	columnTypes := make([]byte, len(cols))
-	for i, c := range cols {
-		var colLen int32
-		switch col := c.(type) {
-		case []int64:
-			colLen = int32(len(col))
-			columnTypes[i] = TypeInt
-		case []string:
-			colLen = int32(len(col))
-			columnTypes[i] = TypeString
-		default:
-			return nil, fmt.Errorf("unsupported column type at %d: %T", i, c)
-		}
-		if colLen != totalRows {
-			return nil, fmt.Errorf("column %d length mismatch: %d != %d", i, colLen, totalRows)
-		}
-	}
-
-	numBatches := (totalRows + batchSize - 1) / batchSize
-	batches := make([]*Batch, 0, numBatches)
-
-	for batchIdx := int32(0); batchIdx < numBatches; batchIdx++ {
-		startRow := batchIdx * batchSize
-		endRow := startRow + batchSize
-		if endRow > totalRows {
-			endRow = totalRows
-		}
-		currentBatchSize := endRow - startRow
-
-		data := make([][]interface{}, len(cols))
-		for colIdx, c := range cols {
-			data[colIdx] = make([]interface{}, currentBatchSize)
-			switch col := c.(type) {
-			case []int64:
-				for r := int32(0); r < currentBatchSize; r++ {
-					data[colIdx][r] = col[startRow+r]
-				}
-			case []string:
-				for r := int32(0); r < currentBatchSize; r++ {
-					data[colIdx][r] = col[startRow+r]
-				}
-			}
-		}
-
-		batches = append(batches, &Batch{
-			BatchSize:   int32(currentBatchSize),
-			NumColumns:  int32(len(cols)),
-			ColumnTypes: columnTypes,
-			Data:        data,
-		})
-	}
-
-	return batches, nil
-}
-
 func NewBatchDeserializer(tablePath string) (*Deserializer, error) {
 	return &Deserializer{
 		tablePath: tablePath,
@@ -122,83 +31,50 @@ func (d *Deserializer) ReadBatch(batchIndex int) (*Batch, error) {
 		return nil, err
 	}
 
-	columnFooters, err := d.readFooter(file, header)
+	batchFooters, err := d.readFooter(file, header)
 	if err != nil {
 		return nil, err
 	}
 
-	numRows := header.BatchSize
-	numCols := header.NumColumns
-	data := make([][]interface{}, numCols)
-	for r := int32(0); r < numCols; r++ {
-		data[r] = make([]interface{}, numRows)
+	data := make([][]int64, header.NumColumns)
+	for r := range header.NumColumns {
+		data[r] = make([]int64, header.BatchSize)
 	}
-
-	columnTypes := make([]byte, numCols)
 
 	currentOffset := int64(HeaderSize)
 
-	for i, cf := range columnFooters {
-		columnTypes[i] = cf.Type
+	for i := range header.NumColumns {
 
-		var nextOffset int64
-		if i == len(columnFooters)-1 {
-			nextOffset = header.FooterOffset
-		} else {
-			nextOffset = columnFooters[i+1].Offset
+		endOfColumn := batchFooters.ColumnsOffset[i+1]
+		compressedSize := endOfColumn - currentOffset
+		compressedData := make([]byte, compressedSize)
+
+		if _, err := file.ReadAt(compressedData, currentOffset); err != nil {
+			return nil, err
 		}
 
-		switch cf.Type {
-		case TypeInt:
-			compressedSize := nextOffset - currentOffset
-			compressedData := make([]byte, compressedSize)
+		values := utils.DecompressIntegers(compressedData, batchFooters.ColumnsDelta[i])
 
-			if _, err := file.ReadAt(compressedData, currentOffset); err != nil {
-				return nil, err
-			}
+		data[i] = values
+		currentOffset = endOfColumn
+	}
 
-			values := utils.DecompressIntegers(compressedData, cf.Delta)
-			for r := range values {
-				data[i][r] = values[r]
-			}
+	compressedStrings := make([]byte, batchFooters.StringSize)
+	if _, err := file.ReadAt(compressedStrings, batchFooters.StringOffset); err != nil {
+		return nil, err
+	}
 
-		case TypeString:
-			offsetsSize := cf.DataOffset - currentOffset
-			compressedOffsets := make([]byte, offsetsSize)
-			if _, err := file.ReadAt(compressedOffsets, currentOffset); err != nil {
-				return nil, err
-			}
-			offsets := utils.DecompressIntegers(compressedOffsets, cf.Delta)
-
-			compressedStringsSize := nextOffset - cf.DataOffset
-			compressedStrings := make([]byte, compressedStringsSize)
-			if _, err := file.ReadAt(compressedStrings, cf.DataOffset); err != nil {
-				return nil, err
-			}
-
-			decompressedStrings, err := utils.DecompressLZ4(compressedStrings)
-			if err != nil {
-				return nil, err
-			}
-
-			strs := utils.DecompressStrings(decompressedStrings, offsets)
-
-			for r := range strs {
-				data[i][r] = strs[r]
-			}
-
-		default:
-			return nil, fmt.Errorf("unknown column type %d", cf.Type)
-		}
-
-		currentOffset = nextOffset
+	stringData, err := utils.DecompressLZ4(compressedStrings)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Batch{
-		BatchSize:   numRows,
-		NumColumns:  numCols,
-		ColumnTypes: columnTypes,
+		BatchSize:   header.BatchSize,
+		NumColumns:  header.NumColumns,
+		ColumnTypes: batchFooters.ColumnsType,
 		Data:        data,
+		String:      string(stringData),
 	}, nil
 }
 
@@ -222,26 +98,74 @@ func (d *Deserializer) readHeader(file *os.File) (*FileHeader, error) {
 	return header, nil
 }
 
-func (d *Deserializer) readFooter(file *os.File, header *FileHeader) ([]ColumnFooter, error) {
+func (d *Deserializer) readFooter(file *os.File, header *FileHeader) (*BatchFooter, error) {
 	if _, err := file.Seek(header.FooterOffset, 0); err != nil {
 		return nil, err
 	}
 
-	footers := make([]ColumnFooter, header.NumColumns)
-	for i := 0; i < int(header.NumColumns); i++ {
-		if err := binary.Read(file, binary.LittleEndian, &footers[i].Type); err != nil {
-			return nil, err
-		}
-		if err := binary.Read(file, binary.LittleEndian, &footers[i].Delta); err != nil {
-			return nil, err
-		}
-		if err := binary.Read(file, binary.LittleEndian, &footers[i].Offset); err != nil {
-			return nil, err
-		}
-		if err := binary.Read(file, binary.LittleEndian, &footers[i].DataOffset); err != nil {
-			return nil, err
-		}
+	deltaDelta := int64(0)
+	deltaOffset := int64(0)
+	offset1 := int64(0)
+	offset2 := int64(0)
+	stringOffset := int64(0)
+	stringSize := int64(0)
+
+	if err := binary.Read(file, binary.LittleEndian, &deltaDelta); err != nil {
+		return nil, err
+	}
+	if err := binary.Read(file, binary.LittleEndian, &deltaOffset); err != nil {
+		return nil, err
+	}
+	if err := binary.Read(file, binary.LittleEndian, &offset1); err != nil {
+		return nil, err
+	}
+	if err := binary.Read(file, binary.LittleEndian, &offset2); err != nil {
+		return nil, err
+	}
+	if err := binary.Read(file, binary.LittleEndian, &stringOffset); err != nil {
+		return nil, err
+	}
+	if err := binary.Read(file, binary.LittleEndian, &stringSize); err != nil {
+		return nil, err
 	}
 
-	return footers, nil
+	compressedTypes := make([]byte, header.NumColumns)
+	if _, err := file.Read(compressedTypes); err != nil {
+		return nil, err
+	}
+
+	compressedDeltas := make([]byte, offset2-offset1)
+	if _, err := file.Read(compressedDeltas); err != nil {
+		return nil, err
+	}
+	deltas := utils.DecompressIntegers(compressedDeltas, deltaDelta)
+
+	compressedOffsets := make([]byte, stringOffset-offset2)
+	if _, err := file.Read(compressedOffsets); err != nil {
+		return nil, err
+	}
+	offsets := utils.DecompressIntegers(compressedOffsets, deltaOffset)
+
+	// fmt.Println("Footer read=====================: ")
+	// fmt.Println(" deltaDelta:", deltaDelta)
+	// fmt.Println(" deltaOffset:", deltaOffset)
+	// fmt.Println(" offset1:", offset1)
+	// fmt.Println(" offset2:", offset2)
+	// fmt.Println(" stringOffset:", stringOffset)
+	// fmt.Println(" stringSize:", stringSize)
+	// fmt.Println(" ColumnsType:", compressedTypes)
+	// fmt.Println(" ColumnsDelta:", deltas)
+	// fmt.Println(" ColumnsOffset:", offsets)
+
+	return &BatchFooter{
+		DeltaDelta:    deltaDelta,
+		DeltaOffset:   deltaOffset,
+		Offset1:       offset1,
+		Offset2:       offset2,
+		StringOffset:  stringOffset,
+		StringSize:    stringSize,
+		ColumnsType:   compressedTypes,
+		ColumnsOffset: offsets,
+		ColumnsDelta:  deltas,
+	}, nil
 }

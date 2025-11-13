@@ -51,86 +51,59 @@ func (s *Serializer) WriteBatch(batchIndex int, batch *Batch) error {
 	}
 
 	currentOffset := int64(HeaderSize)
-	columnFooters := make([]ColumnFooter, batch.NumColumns)
+	// columnFooters := make([]ColumnFooter, batch.NumColumns)
 
-	for i := 0; i < int(batch.NumColumns); i++ {
+	// footerColumnsType := make([]byte, batch.NumColumns)
+	footerColumnsOffset := make([]int64, batch.NumColumns+1)
+	footerColumnsDelta := make([]int64, batch.NumColumns)
 
-		colData := make([]interface{}, batch.BatchSize)
-		for r := 0; r < int(batch.BatchSize); r++ {
-			colData[r] = batch.Data[i][r]
+	for i := range batch.NumColumns {
+
+		if batch.ColumnTypes[i] != TypeInt && batch.ColumnTypes[i] != TypeString {
+			return fmt.Errorf("unsupported column type %d", batch.ColumnTypes[i])
 		}
 
-		switch colData[0].(type) {
-		case int64:
+		row := make([]int64, len(batch.Data[i]))
+		copy(row, batch.Data[i])
 
-			ints := make([]int64, len(colData))
-			for j, val := range colData {
-				ints[j] = val.(int64)
-			}
+		compressed, min := utils.CompressIntegers(row)
 
-			compressed, min := utils.CompressIntegers(ints)
+		// fmt.Print("Writing column ", i, " with min ", min, " and compressed :", compressed, "\n")
 
-			n, err := file.Write(compressed)
-			if err != nil {
-				return err
-			}
-
-			columnFooters[i] = ColumnFooter{
-				Type:       TypeInt,
-				Delta:      min,
-				Offset:     currentOffset,
-				DataOffset: 0,
-			}
-
-			currentOffset += int64(n)
-
-		case string:
-
-			strs := make([]string, len(colData))
-			for j, val := range colData {
-				strs[j] = val.(string)
-			}
-
-			blob, offsets := utils.BuildConcatenatedBlob(strs)
-			compressedOffsets, min := utils.CompressIntegers(offsets)
-
-			n1, err := file.Write(compressedOffsets)
-			if err != nil {
-				return err
-			}
-			columnOffset := currentOffset
-			currentOffset += int64(n1)
-
-			dataStart := currentOffset
-
-			compressedBlob, err := utils.CompressLZ4(blob)
-			if err != nil {
-				return err
-			}
-
-			n2, err := file.Write(compressedBlob)
-			if err != nil {
-				return err
-			}
-
-			columnFooters[i] = ColumnFooter{
-				Type:       TypeString,
-				Delta:      min,
-				Offset:     columnOffset,
-				DataOffset: dataStart,
-			}
-
-			currentOffset += int64(n2)
-
-		default:
-			return fmt.Errorf("column %d: unsupported type %T", i, colData[0])
+		n, err := file.Write(compressed)
+		if err != nil {
+			return err
 		}
+
+		// if batch.ColumnTypes[i] == TypeInt {
+		// 	footerColumnsType[i] = TypeInt
+		// } else {
+		// 	footerColumnsType[i] = TypeString
+		// }
+
+		// footerColumnsType[i] = TypeInt
+		footerColumnsOffset[i] = currentOffset
+		footerColumnsDelta[i] = min
+
+		currentOffset += int64(n)
+	}
+
+	footerColumnsOffset[batch.NumColumns] = currentOffset
+
+	compressedStrings, err := utils.CompressLZ4([]byte(batch.String))
+	if err != nil {
+		return err
 	}
 
 	footerOffset := currentOffset
 	header.FooterOffset = footerOffset
 
-	if err := s.writeFooter(file, columnFooters); err != nil {
+	if err := s.writeFooter(file, currentOffset, int64(len(compressedStrings)), batch.ColumnTypes, footerColumnsOffset, footerColumnsDelta); err != nil {
+		return err
+	}
+
+	_, err = file.Write(compressedStrings)
+	if err != nil {
 		return err
 	}
 
@@ -157,20 +130,70 @@ func (s *Serializer) writeHeader(file *os.File, h FileHeader) error {
 	return nil
 }
 
-func (s *Serializer) writeFooter(file *os.File, footers []ColumnFooter) error {
-	for _, cf := range footers {
-		if err := binary.Write(file, binary.LittleEndian, cf.Type); err != nil {
-			return err
-		}
-		if err := binary.Write(file, binary.LittleEndian, cf.Delta); err != nil {
-			return err
-		}
-		if err := binary.Write(file, binary.LittleEndian, cf.Offset); err != nil {
-			return err
-		}
-		if err := binary.Write(file, binary.LittleEndian, cf.DataOffset); err != nil {
-			return err
-		}
+func (s *Serializer) writeFooter(file *os.File, currentOffset int64, stringSize int64, footerColumnsType []byte, footerColumnsOffset []int64, footerColumnsDelta []int64) error {
+
+	compressedDelta, deltaDelta := utils.CompressIntegers(footerColumnsDelta)
+
+	compressedOffsets, deltaOffset := utils.CompressIntegers(footerColumnsOffset)
+
+	currentOffset += 48 // 6 int64
+
+	currentOffset += int64(len(footerColumnsType))
+	offset1 := currentOffset
+
+	currentOffset += int64(len(compressedDelta))
+	offset2 := currentOffset
+
+	currentOffset += int64(len(compressedOffsets))
+
+	if err := binary.Write(file, binary.LittleEndian, deltaDelta); err != nil {
+		return err
 	}
+
+	if err := binary.Write(file, binary.LittleEndian, deltaOffset); err != nil {
+		return err
+	}
+
+	if err := binary.Write(file, binary.LittleEndian, offset1); err != nil {
+		return err
+	}
+
+	if err := binary.Write(file, binary.LittleEndian, offset2); err != nil {
+		return err
+	}
+
+	if err := binary.Write(file, binary.LittleEndian, currentOffset); err != nil {
+		return err
+	}
+
+	if err := binary.Write(file, binary.LittleEndian, stringSize); err != nil {
+		return err
+	}
+
+	_, err := file.Write(footerColumnsType)
+	if err != nil {
+		return err
+	}
+
+	_, err = file.Write(compressedDelta)
+	if err != nil {
+		return err
+	}
+
+	_, err = file.Write(compressedOffsets)
+	if err != nil {
+		return err
+	}
+	// fmt.Println("Footer read =============================: ")
+	// fmt.Println("deltaDelta", deltaDelta)
+	// fmt.Println("deltaOffset", deltaOffset)
+	// fmt.Println("offset1", offset1)
+	// fmt.Println("offset2", offset2)
+	// fmt.Println("stringOffset", currentOffset)
+	// fmt.Println("stringSize", stringSize)
+	// fmt.Println("footerColumnsType", footerColumnsType)
+	// fmt.Println("footerColumnsOffset", footerColumnsOffset)
+	// fmt.Println("footerColumnsDelta", footerColumnsDelta)
+
 	return nil
 }

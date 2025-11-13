@@ -167,6 +167,8 @@ func ComputeMeansAndLetterHistograms(tablePath string) (map[int]float64, map[int
 }
 
 func main() {
+	// RunAllTests()
+
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "usage: %s <table_folder>\n", os.Args[0])
 		os.Exit(2)

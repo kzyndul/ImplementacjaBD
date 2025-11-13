@@ -2,4 +2,4 @@ module Zadanie2
 
 go 1.22.2
 
-require github.com/pierrec/lz4/v4 v4.1.22 // indirect
+require github.com/pierrec/lz4/v4 v4.1.22

@@ -4,6 +4,7 @@
 
 ## Kompilacja i uruchomienie
 go build
+
 ./Zadanie2 <table_folder>
 
 
@@ -30,20 +31,20 @@ Każdy plik danych składa się z czterech części:
 
 
 2. Dane - dane są przechowywane w postaci tablicy dwuwymiarowej, w której:
- - każdy wiersz odpowiada kolumnie w tabeli,
- - wszystkie dane numeryczne (int64) są skompresowane przy użyciu variable-length encoding oraz delta encoding.
- - dla kolumn tekstowych tablica zawiera BatchSize + 1 elementów (offsety początków i końców napisów).
+    - każdy wiersz odpowiada kolumnie w tabeli,
+    - wszystkie dane numeryczne (int64) są skompresowane przy użyciu variable-length encoding oraz delta encoding.
+    - dla kolumn tekstowych tablica zawiera BatchSize + 1 elementów (offsety początków i końców napisów).
 
 3. Stopka pliku - metadane opisujące kolumny, ich typy, lokalizację oraz informacje o kompresji:
- - DeltaDelta       int64	wartość do dekodowania tablicy ColumnsDelta,
- - DeltaOffset	    int64	wartość do dekodowania tablicy ColumnsOffset,
- - Offset1	        int64	offset końca tablicy ColumnsType,
- - Offset2	        int64	offset końca tablicy ColumnsDelta,
- - StringOffset	    int64	offset końca tablicy ColumnsOffset = początku skompresowanych napisów,
- - StringSize	    int64	rozmiar skompresowanego ciągu znaków,
- - ColumnsType	    []byte	typy każdej z kolumn, 
- - ColumnsDelta	    []int64	wartość do dekodowania każdej z kolumn kolumny,
- - ColumnsOffset	[]int64	offset gdzie dana kolumna się zaczyna (BatchSize + 1).
+    - DeltaDelta       int64	wartość do dekodowania tablicy ColumnsDelta,
+    - DeltaOffset	    int64	wartość do dekodowania tablicy ColumnsOffset,
+    - Offset1	        int64	offset końca tablicy ColumnsType,
+    - Offset2	        int64	offset końca tablicy ColumnsDelta,
+    - StringOffset	    int64	offset końca tablicy ColumnsOffset = początku skompresowanych napisów,
+    - StringSize	    int64	rozmiar skompresowanego ciągu znaków,
+    - ColumnsType	    []byte	typy każdej z kolumn, 
+    - ColumnsDelta	    []int64	wartość do dekodowania każdej z kolumn kolumny,
+    - ColumnsOffset	[]int64	offset gdzie dana kolumna się zaczyna (BatchSize + 1).
 
 4. Skompresowany string, który jest konkatenacją wszystkich napisów ze wszystkich kolumn. Ten ciąg znaków jest kompresowany przy użyciu LZ4, aby zminimalizować rozmiar pliku.
 

@@ -1,0 +1,12 @@
+# Test folders and files
+*Test/
+*test/
+test*/
+Test*/
+*_test/
+*_Test/
+
+# Test files
+*test*
+*Test*
+*.test

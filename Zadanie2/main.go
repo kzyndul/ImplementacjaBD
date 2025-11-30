@@ -1,219 +1,92 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
-	"regexp"
-	"sort"
-	"strconv"
-	"unicode"
+	"os/signal"
+	"syscall"
+	"time"
+
+	openapi "Zadanie2/go"
+	metastore "Zadanie2/metastore"
 )
-
-const (
-	TypeInt    byte = 0
-	TypeString byte = 1
-	HeaderSize      = 16 // 4 + 4 + 8
-
-	BatchSize = 8192
-)
-
-type FileHeader struct {
-	BatchSize    int32 // Number of rows per batch
-	NumColumns   int32 // Number of columns
-	FooterOffset int64 // Offset where footer starts
-
-}
-
-type BatchFooter struct {
-	DeltaDelta    int64
-	DeltaOffset   int64
-	Offset1       int64   // Where ColumnsType ends
-	Offset2       int64   // Where ColumnsOffset ends
-	StringOffset  int64   // Where ColumnsDelta ends
-	StringSize    int64   // Size of the compressed string
-	ColumnsType   []byte  // 0 = int, 1 = string
-	ColumnsDelta  []int64 // min value for delta compression
-	ColumnsOffset []int64 // Offset of the column
-}
-
-type Batch struct {
-	BatchSize   int32
-	NumColumns  int32
-	ColumnTypes []byte
-	Data        [][]int64
-	String      string
-}
-
-// func printBatch(batch *Batch) {
-// 	println("Batch Size:", batch.BatchSize, "Num Columns:", batch.NumColumns)
-// 	for i, _ := range batch.Data {
-// 		switch batch.Data[i][0].(type) {
-// 		case int64:
-// 			println("Column", i, "Type: int64 Values:", fmt.Sprint(batch.Data[i]))
-// 		case string:
-// 			println("Column", i, "Type: string Values:", fmt.Sprint(batch.Data[i]))
-// 		default:
-// 			println("Column", i, "Type: unknown")
-// 		}
-// 	}
-// }
-
-func getBatchFiles(tablePath string) ([]int, error) {
-	files, err := os.ReadDir(tablePath)
-	if err != nil {
-		return nil, err
-	}
-
-	var batchIndices []int
-	batchRegex := regexp.MustCompile(`^batch_(\d+)\.dat$`)
-
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-		matches := batchRegex.FindStringSubmatch(file.Name())
-		if len(matches) == 2 {
-			index, err := strconv.Atoi(matches[1])
-			if err != nil {
-				continue
-			}
-			batchIndices = append(batchIndices, index)
-		}
-	}
-
-	// sort.Ints(batchIndices)
-
-	return batchIndices, nil
-}
-
-func LoadAllBatches(tablePath string) ([]*Batch, error) {
-	indices, err := getBatchFiles(tablePath)
-	if err != nil {
-		return nil, err
-	}
-	if len(indices) == 0 {
-		return nil, fmt.Errorf("no batch_*.dat files found in %q", tablePath)
-	}
-
-	d, err := NewBatchDeserializer(tablePath)
-	if err != nil {
-		return nil, err
-	}
-
-	batches := make([]*Batch, 0, len(indices))
-	for _, idx := range indices {
-		b, err := d.ReadBatch(idx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read batch %d: %w", idx, err)
-		}
-		batches = append(batches, b)
-	}
-	return batches, nil
-}
-
-func ComputeMeansAndLetterHistograms(tablePath string) (map[int]float64, map[int]map[rune]int, error) {
-	batches, err := LoadAllBatches(tablePath)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(batches) == 0 {
-		return map[int]float64{}, map[int]map[rune]int{}, nil
-	}
-
-	first := batches[0]
-	numCols := int(first.NumColumns)
-	colTypes := first.ColumnTypes
-
-	sums := make([]float64, numCols)
-	counts := make([]int64, numCols)
-	hists := make(map[int]map[rune]int, numCols)
-
-	for _, b := range batches {
-		for i := 0; i < numCols; i++ {
-			switch colTypes[i] {
-			case TypeInt:
-				col := b.Data[i]
-				for _, v := range col {
-					sums[i] += float64(v)
-				}
-				counts[i] += int64(len(col))
-			case TypeString:
-				if hists[i] == nil {
-					hists[i] = make(map[rune]int)
-				}
-
-				start := int(b.Data[i][0])
-				end := int(b.Data[i][len(b.Data[i])-1])
-
-				for _, r := range b.String[start:end] {
-					if unicode.IsLetter(r) {
-						r = unicode.ToLower(r)
-						hists[i][r]++
-					}
-				}
-			default:
-			}
-		}
-	}
-
-	means := make(map[int]float64, numCols)
-	for i := 0; i < numCols; i++ {
-		if colTypes[i] == TypeInt && counts[i] > 0 {
-			means[i] = sums[i] / float64(counts[i])
-		}
-	}
-
-	return means, hists, nil
-}
 
 func main() {
-	// RunAllTests()
+	log.Printf("Server starting...")
 
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "usage: %s <table_folder>\n", os.Args[0])
-		os.Exit(2)
+	// 1) Metastore: load or create empty
+	ms := metastore.NewMetastore("metastore.json")
+	if err := ms.Load(); err != nil {
+		log.Fatalf("failed to load metastore: %v", err)
 	}
-	tablePath := os.Args[1]
-
-	means, hists, err := ComputeMeansAndLetterHistograms(tablePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	if ms.Tables == nil {
+		ms.Tables = map[string]*metastore.Table{}
 	}
 
-	fmt.Println("Means:")
-	if len(means) == 0 {
-		fmt.Println("  (none)")
-	} else {
-		var keys []int
-		for k := range means {
-			keys = append(keys, k)
-		}
-		sort.Ints(keys)
-		for _, k := range keys {
-			fmt.Printf("  column %d: %f\n", k, means[k])
-		}
+	Proj3Service := openapi.NewProj3APIService(ms)
+	Proj3Controller := openapi.NewProj3APIController(Proj3Service)
+
+	SchemaAPIService := openapi.NewSchemaAPIService()
+	SchemaAPIController := openapi.NewSchemaAPIController(SchemaAPIService)
+
+	router := openapi.NewRouter(Proj3Controller, SchemaAPIController)
+
+	// 4) Serve OpenAPI spec and Swagger UI
+	mux := http.NewServeMux()
+	mux.Handle("/", router)
+
+	// Serve your OpenAPI YAML/JSON (put a copy at project root as openapi.yaml)
+	mux.HandleFunc("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "dbmsInterface.yaml")
+	})
+
+	// Simple Swagger UI page using CDN
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.ui = SwaggerUIBundle({ url: "/openapi.yaml", dom_id: "#swagger-ui" });
+  </script>
+</body>
+</html>`)
+	})
+
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
 	}
 
-	fmt.Println("Histograms:")
-	if len(hists) == 0 {
-		fmt.Println("  (none)")
-	} else {
-		var cols []int
-		for c := range hists {
-			cols = append(cols, c)
+	// 5) Graceful shutdown; persist metastore once on exit
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("HTTP on %s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
 		}
-		sort.Ints(cols)
-		for _, c := range cols {
-			fmt.Printf("  column %d:\n", c)
-			var runes []rune
-			for r := range hists[c] {
-				runes = append(runes, r)
-			}
-			sort.Slice(runes, func(i, j int) bool { return runes[i] < runes[j] })
-			for _, r := range runes {
-				fmt.Printf("    %q: %d\n", r, hists[c][r])
-			}
-		}
+	}()
+
+	<-stop
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ms.Save(); err != nil {
+		log.Printf("metastore save error: %v", err)
 	}
+	ms.PrintMetadata(os.Stdout)
+	_ = srv.Shutdown(ctx)
+	log.Println("shutdown complete")
 }

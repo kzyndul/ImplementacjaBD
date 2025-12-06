@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -193,9 +192,7 @@ func (m *Metastore) CreateTable(name string, columns []Column, dataDir string) (
 	if err := validateTableName(name); err != nil {
 		return "", err
 	}
-	if _, exists := m.Tables[name]; exists {
-		return "", fmt.Errorf("table %s already exists", name)
-	}
+
 	if len(columns) == 0 {
 		return "", fmt.Errorf("can't create table with zero columns")
 	}
@@ -205,6 +202,10 @@ func (m *Metastore) CreateTable(name string, columns []Column, dataDir string) (
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if _, exists := m.Tables[name]; exists {
+		return "", fmt.Errorf("table %s already exists", name)
+	}
 
 	t := &Table{
 		ID:            uuid.NewString(),
@@ -256,21 +257,22 @@ func (m *Metastore) getTable(name string) (*Table, error) {
 }
 
 func (m *Metastore) DropTable(tableName string) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
 	table, err := m.getTable(tableName)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 
 	table.AcquireWrite()
 	defer table.ReleaseWrite()
 	tableFiles := table.GetDataFiles()
-	log.Println("Deleting table", tableName, "with files:", tableFiles)
+	// log.Println("Deleting table", tableName, "with files:", tableFiles)
 
 	delete(m.Tables, tableName)
+	m.mu.Unlock()
 
-	log.Println("Deleting table2", tableName, "with files:", tableFiles)
+	// log.Println("Deleting table2", tableName, "with files:", tableFiles)
 
 	for _, filePath := range tableFiles {
 		if err := os.Remove(filePath); err != nil {

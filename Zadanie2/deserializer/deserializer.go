@@ -27,6 +27,10 @@ func (d *Deserializer) ReadTableData() ([][]int64, map[int]string, error) {
 		return nil, nil, err
 	}
 
+	if len(columnFiles) == 0 {
+		return nil, nil, fmt.Errorf("no column files found")
+	}
+
 	firstColPath := filepath.Join(d.tablePath, fmt.Sprintf("column_%d.dat", columnFiles[0]))
 	firstFile, err := os.Open(firstColPath)
 	if err != nil {
@@ -53,13 +57,25 @@ func (d *Deserializer) ReadTableData() ([][]int64, map[int]string, error) {
 			if len(data[colIdx]) == 0 {
 				data[colIdx] = make([]int64, 0)
 			}
-			data[colIdx] = append(data[colIdx], values...)
 
 			if colType == TypeString {
 				if _, ok := stringData[colIdx]; !ok {
 					stringData[colIdx] = ""
 				}
 				stringData[colIdx] += strData
+				lastElement := int64(0)
+				if len(data[colIdx]) > 0 {
+					lastElement = data[colIdx][len(data[colIdx])-1]
+					values = values[1:]
+				}
+
+				for i := range values {
+					values[i] += lastElement
+				}
+				data[colIdx] = append(data[colIdx], values...)
+
+			} else {
+				data[colIdx] = append(data[colIdx], values...)
 			}
 		}
 	}

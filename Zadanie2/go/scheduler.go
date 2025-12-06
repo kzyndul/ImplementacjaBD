@@ -5,8 +5,8 @@ import (
 	"Zadanie2/metastore"
 	"encoding/csv"
 	"fmt"
-	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +23,6 @@ type QueryScheduler struct {
 	dataDir    string
 }
 
-// TODO
 func NewQueryScheduler(ms *metastore.Metastore, qs *queryStore, numWorkers int, dataDir string) *QueryScheduler {
 	return &QueryScheduler{
 		ms:         ms,
@@ -40,34 +39,34 @@ func (sched *QueryScheduler) Start() {
 		sched.wg.Add(1)
 		go sched.worker(i)
 	}
-	log.Printf("Query scheduler started with %d workers", sched.numWorkers)
+	// log.Printf("Query scheduler started with %d workers", sched.numWorkers)
 }
 
 func (sched *QueryScheduler) Stop() {
 	close(sched.stopChan)
 	sched.wg.Wait()
-	log.Println("Query scheduler stopped")
+	// log.Println("Query scheduler stopped")
 }
 
 func (sched *QueryScheduler) SubmitQuery(queryID string) {
 	select {
 	case sched.workQueue <- queryID:
-		log.Printf("Query %s submitted to scheduler", queryID)
+		// log.Printf("Query %s submitted to scheduler", queryID)
 	case <-sched.stopChan:
-		log.Printf("Scheduler stopped, cannot submit query %s", queryID)
+		// log.Printf("Scheduler stopped, cannot submit query %s", queryID)
 	}
 }
 
 func (sched *QueryScheduler) worker(id int) {
 	defer sched.wg.Done()
-	log.Printf("Worker %d started", id)
+	// log.Printf("Worker %d started", id)
 
 	for {
 		select {
 		case queryID := <-sched.workQueue:
 			sched.executeQuery(id, queryID)
 		case <-sched.stopChan:
-			log.Printf("Worker %d stopped", id)
+			// log.Printf("Worker %d stopped", id)
 			return
 		}
 	}
@@ -75,59 +74,59 @@ func (sched *QueryScheduler) worker(id int) {
 
 // executeQuery executes a single query based on its type
 func (sched *QueryScheduler) executeQuery(workerID int, queryID string) {
+	// log.Println("Worker starting executeQuery", queryID)
 	iq, ok := sched.qs.get(queryID)
-	log.Println("executeQuery", iq.string())
+	// log.Println("executeQuery", iq.string())
 	if !ok {
-		log.Printf("Worker %d: Query %s not found", workerID, queryID)
+		// log.Printf("Worker %d: Query %s not found", workerID, queryID)
 		return
 	}
 
-	log.Printf("Worker %d: Executing query %s (SELECT=%v)", workerID, queryID, iq.IsSelect)
+	defer func() {
+		if iq.doneChan != nil {
+			close(iq.doneChan)
+		}
+	}()
+	// log.Printf("Worker %d: Executing query %s (SELECT=%v)", workerID, queryID, iq.IsSelect)
 
 	// Update status to RUNNING
 	now := time.Now()
-	iq.Status = RUNNING
-	iq.Started = &now
+	iq.SetRunning(now)
 
 	var err error
+	var resultRows QueryResultInner
+
 	if iq.IsDelete {
-		// DELETE query
 		err = sched.executeDelete(iq)
 	} else if iq.IsSelect {
-		// SELECT query
-		err = sched.executeSelect(iq)
+		resultRows, err = sched.executeSelect(iq)
 	} else {
-		// LOAD query
 		err = sched.executeLoad(iq)
 	}
 
 	// Update final status
 	finished := time.Now()
-	iq.Finished = &finished
 
 	if err != nil {
-		iq.Status = FAILED
 		errMsg := err.Error()
-		iq.Error = &MultipleProblemsError{
+		iq.SetFailed(finished, &MultipleProblemsError{
 			Problems: []MultipleProblemsErrorProblemsInner{{Error: errMsg}},
-		}
-		log.Printf("Worker %d: Query %s FAILED: %v", workerID, queryID, err)
+		})
+		// log.Printf("Worker %d: Query %s FAILED: %v", workerID, queryID, err)
 	} else {
-		iq.Status = COMPLETED
-		iq.IsResultAvailable = iq.IsSelect
-		log.Printf("Worker %d: Query %s COMPLETED", workerID, queryID)
+		iq.SetCompleted(finished, resultRows, iq.IsSelect)
+		// log.Printf("Worker %d: Query %s COMPLETED", workerID, queryID)
 	}
 }
 
 // executeSelect handles SELECT query execution
-func (sched *QueryScheduler) executeSelect(iq *internalQuery) error {
-
+func (sched *QueryScheduler) executeSelect(iq *internalQuery) (QueryResultInner, error) {
 	tableName := iq.QueryDefinition.TableName
-
 	// TODO check table existence erlier
+	// log.Printf("Executing SELECT on table %s", tableName)
 	table, err := sched.ms.GetTableByName(tableName)
 	if err != nil {
-		return err
+		return QueryResultInner{}, err
 	}
 
 	table.AcquireRead()
@@ -137,43 +136,49 @@ func (sched *QueryScheduler) executeSelect(iq *internalQuery) error {
 
 	rows, err := sched.readTableData(table, tableDataFiles, iq.QueryDefinition)
 	if err != nil {
-		return err
+		return QueryResultInner{}, err
 	}
-	// table.ReleaseRead()
 
-	iq.ResultRows = rows
-
-	return nil
+	return rows, nil
 }
 
 // readTableData reads data from table files and applies filtering/projection
 func (sched *QueryScheduler) readTableData(table *metastore.Table, dataFiles []string, qd QueryQueryDefinition) (QueryResultInner, error) {
 
 	allRows := QueryResultInner{}
+	allRows.RowCount = int32(0)
+	allRows.Columns = make([]QueryResultInnerColumnsInner, 0)
 
-	// for _, filePath := range dataFiles {
-	des, _ := deserializer.NewBatchDeserializer(sched.dataDir)
-	ints, strings, err := des.ReadTableData()
+	tablePath := filepath.Join(sched.dataDir, table.Name)
+
+	des, err := deserializer.NewBatchDeserializer(tablePath)
 	if err != nil {
+		if err.Error() == "no column files found" {
+			return allRows, nil
+		}
+		return QueryResultInner{}, fmt.Errorf("failed to create deserializer: %w", err)
+	}
+
+	ints, stringsMap, err := des.ReadTableData()
+	if err != nil {
+		// log.Println("Error reading table data:", err)
 		return QueryResultInner{}, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	allRows.RowCount = int32(len(ints[0]))
+	if len(ints) > 0 && len(ints[0]) > 0 {
+		allRows.RowCount = int32(len(ints[0]))
+	}
 	allRows.Columns = make([]QueryResultInnerColumnsInner, len(ints))
 
-	// Convert to QueryResultInner format
-
 	for idx, row := range ints {
-		strCol, ok := strings[idx]
+		strCol, ok := stringsMap[idx]
 
 		if ok {
 			col := make([]interface{}, len(row)-1)
-			// strs := make([]string, len(row)-1)
 			for i := 0; i < len(row)-1; i++ {
 				col[i] = strCol[row[i]:row[i+1]]
 			}
 			allRows.Columns[idx] = col
-
 		} else {
 			col := make([]interface{}, len(row))
 			for i := 0; i < len(row); i++ {
@@ -181,28 +186,9 @@ func (sched *QueryScheduler) readTableData(table *metastore.Table, dataFiles []s
 			}
 			allRows.Columns[idx] = col
 		}
-
 	}
 	return allRows, nil
 }
-
-// // readBatchFile reads a single batch file and converts to QueryResultInner format
-// func (sched *QueryScheduler) readBatchFile(table *metastore.Table, filePath string) ([]QueryResultInner, error) {
-// 	// TODO: Replace with your actual batch deserializer
-// 	// For now, this is a placeholder that assumes CSV-like storage
-
-// 	file, err := os.Open(filePath)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	defer file.Close()
-
-// 	// Placeholder: just return empty rows
-// 	// You should integrate with your LoadAllBatches() function here
-// 	log.Printf("Reading batch file: %s (placeholder implementation)", filePath)
-
-// 	return []QueryResultInner{}, nil
-// }
 
 func (sched *QueryScheduler) executeLoad(iq *internalQuery) error {
 
@@ -212,20 +198,23 @@ func (sched *QueryScheduler) executeLoad(iq *internalQuery) error {
 	destCols := iq.QueryDefinition.DestinationColumns
 	header := iq.QueryDefinition.DoesCsvContainHeader
 
+	// log.Printf("Executing LOAD into table %s from %s", tableName, csvPath)
 	table, err := sched.ms.GetTableByName(tableName)
 	if err != nil {
 		return err
 	}
 
+	// log.Printf("Acquiring write lock for table %s", tableName)
 	table.AcquireWrite()
 	defer table.ReleaseWrite()
 
+	// log.Printf("Loading CSV data into table %s from %s", tableName, csvPath)
 	_, err = sched.loadCSVData(table, tableName, csvPath, destCols, header)
 	if err != nil {
 		return fmt.Errorf("failed to load CSV data: %w", err)
 	}
 
-	fmt.Printf("CSV data loaded into table %s from %s\n", tableName, csvPath)
+	// fmt.Printf("CSV data loaded into table %s from %s\n", tableName, csvPath)
 
 	return nil
 }
@@ -253,15 +242,14 @@ func (sched *QueryScheduler) loadCSVData(
 		}
 	}
 
+	// log.Printf("Building column mapping for table %s", tableName)
 	colMapping := sched.buildColumnMapping(csvHeader, table, destCols, hasHeader)
 
+	// log.Println("Column mapping:", colMapping)
 	numCols := len(table.Columns)
-	columnData := make([][]int64, numCols)
-	strings := make([]strings.Builder, numCols)
-
 	rowCount := 0
 
-	// for {
+	// log.Printf("Starting to read CSV data for table %s", tableName)
 	records, err := reader.ReadAll()
 	if err != nil {
 		return 0, fmt.Errorf("failed to read CSV row: %w", err)
@@ -269,17 +257,20 @@ func (sched *QueryScheduler) loadCSVData(
 
 	for rowCount < len(records) {
 		i := 0
+		columnData := make([][]int64, numCols)
+		strings := make([]strings.Builder, numCols)
 		for ; i < deserializer.BatchSize && rowCount < len(records); i += 1 {
 			record := records[rowCount]
 
 			for csvIdx, strVal := range record {
+				// log.Println("Record", record)
 				tableColIdx, ok := colMapping[csvIdx]
 				if !ok {
-					continue // Skip unmapped columns
+					continue
 				}
+
 				colType := table.Columns[tableColIdx].Type
 
-				// Parse value based on column type
 				parsedVal, err := sched.parseValue(strVal, colType)
 				if err != nil {
 					return rowCount, fmt.Errorf("failed to parse value '%s' for column '%s': %w", strVal, table.Columns[tableColIdx].Name, err)
@@ -290,38 +281,41 @@ func (sched *QueryScheduler) loadCSVData(
 					columnData[tableColIdx] = append(columnData[tableColIdx], v)
 				} else if colType == metastore.TypeString {
 					v := parsedVal.(string)
-					columnData[tableColIdx] = append(columnData[tableColIdx], columnData[tableColIdx][len(columnData[tableColIdx])-1]+int64(len(v)))
+					columnData[tableColIdx] = append(columnData[tableColIdx], int64(strings[tableColIdx].Len()))
 					strings[tableColIdx].WriteString(v)
 				}
 			}
 			rowCount += 1
+		}
+		stringsMap := make(map[int]string)
+		columnTypes := make([]byte, numCols)
+		for _, val := range colMapping {
+			colType := table.Columns[val].Type
+			columnTypes[val] = byte(colType)
 
-			stringsMap := make(map[int]string)
-			columnTypes := make([]byte, numCols)
-			for _, val := range colMapping {
-				colType := table.Columns[val].Type
-				columnTypes[val] = byte(colType)
-
-				if colType == metastore.TypeString {
-					columnData[val] = append(columnData[val], int64(strings[val].Len()))
-					stringsMap[val] = strings[val].String()
-				}
+			if colType == metastore.TypeString {
+				columnData[val] = append(columnData[val], int64(strings[val].Len()))
+				stringsMap[val] = strings[val].String()
 			}
+		}
 
-			batch := deserializer.Batch{
-				BatchSize:   int32(i),
-				NumColumns:  int32(numCols),
-				ColumnTypes: columnTypes,
-				Data:        columnData,
-				String:      stringsMap,
-			}
+		batch := deserializer.Batch{
+			BatchSize:   int32(i),
+			NumColumns:  int32(numCols),
+			ColumnTypes: columnTypes,
+			Data:        columnData,
+			String:      stringsMap,
+		}
 
-			serialize, _ := deserializer.NewSerializer(sched.ms.GetDataDir()+"/"+tableName, int32(rowCount), int32(numCols))
-			err = serialize.WriteBatch(rowCount/deserializer.BatchSize, &batch)
-			if err != nil {
-				return rowCount, fmt.Errorf("failed to write batch file: %w", err)
-			}
+		tablePath := filepath.Join(sched.dataDir, table.Name)
+		serialize, err := deserializer.NewSerializer(tablePath, int32(i), int32(numCols))
+		if err != nil {
+			return rowCount, fmt.Errorf("failed to create serializer: %w", err)
+		}
 
+		err = serialize.WriteBatch(rowCount/deserializer.BatchSize, &batch)
+		if err != nil {
+			return 0, fmt.Errorf("failed to write batch file: %w", err)
 		}
 
 	}
@@ -352,9 +346,7 @@ func (sched *QueryScheduler) buildColumnMapping(
 	destCols []string,
 	hasHeader bool,
 ) map[int]int {
-	if len(destCols) == 0 || csvHeader == nil {
-
-		// Direct mapping: CSV column i -> table column i
+	if len(destCols) == 0 {
 		mapping := make(map[int]int)
 		for i := 0; i < len(table.Columns); i++ {
 			mapping[i] = i
@@ -365,28 +357,30 @@ func (sched *QueryScheduler) buildColumnMapping(
 	mapping := make(map[int]int)
 
 	for csvIdx, mapsTo := range destCols {
-		for columnName, _ := range table.ColumnMapping {
-			if columnName == mapsTo {
-				mapping[csvIdx] = table.ColumnMapping[columnName]
-				break
-			}
+		_, ok := table.ColumnMapping[mapsTo]
+		if ok {
+			mapping[csvIdx] = table.ColumnMapping[mapsTo]
+			continue
 		}
 	}
 
 	return mapping
 }
 
-// executeDelete handles DELETE query execution
 func (sched *QueryScheduler) executeDelete(iq *internalQuery) error {
 
-	tableName := iq.QueryDefinition.TableName
-
-	err := sched.ms.DropTable(tableName)
+	tableID := iq.QueryDefinition.TableName
+	table, err := sched.ms.GetTableById(tableID)
 	if err != nil {
-		return fmt.Errorf("failed to drop table %s: %w", tableName, err)
+		return err
 	}
 
-	log.Printf("Table %s deleted", tableName)
+	err = sched.ms.DropTable(table.Name)
+	if err != nil {
+		return fmt.Errorf("failed to drop table %s: %w", table.Name, err)
+	}
+
+	// log.Printf("Table %s deleted", table.Name)
 
 	return nil
 }

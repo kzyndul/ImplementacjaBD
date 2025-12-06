@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -32,7 +31,6 @@ func convertTypeToLogical(t metastore.ColumnType) LogicalColumnType {
 		panic("unknown column type")
 	}
 }
-
 
 func convertTypeFromLogical(t LogicalColumnType) (metastore.ColumnType, error) {
     switch t {
@@ -56,10 +54,6 @@ func convertColumns(cols []metastore.Column) []Column {
     return out
 }
 
-
-// Proj3APIService is a service that implements the logic for the Proj3APIServicer
-// This service should implement the business logic for every endpoint for the Proj3API API.
-// Include any external packages or services that will be required by this service.
 type Proj3APIService struct {
     ms *metastore.Metastore
     qs *queryStore
@@ -67,11 +61,9 @@ type Proj3APIService struct {
 	scheduler *QueryScheduler
 }
 
-// NewProj3APIService creates a default api service
 func NewProj3APIService(ms *metastore.Metastore) *Proj3APIService {
 	qs := newQueryStore()
-	dataDir := ms.GetDataDir()
-	scheduler := NewQueryScheduler(ms, qs, 4, dataDir)
+	scheduler := NewQueryScheduler(ms, qs, 4, "data")
 	scheduler.Start()
 	return &Proj3APIService{ms: ms, qs: qs, si: NewSystemInfo("1.0.1", "1", "Krzysztof Żyndul"), scheduler: scheduler}
 }
@@ -80,9 +72,6 @@ func (s *Proj3APIService) Shutdown() {
 	s.scheduler.Stop()
 }
 
-
-
-// GetTables - Get list of tables with their accompaning IDs. Use those IDs to get details by calling /table endpoint.
 func (s *Proj3APIService) GetTables(ctx context.Context) (ImplResponse, error) {
     tables := s.ms.ListTables()
     shallow := make([]ShallowTable, len(tables))
@@ -92,9 +81,6 @@ func (s *Proj3APIService) GetTables(ctx context.Context) (ImplResponse, error) {
     return Response(http.StatusOK, shallow), nil
 }
 
-
-
-// GetTableById - Get detailed description of selected table
 func (s *Proj3APIService) GetTableById(
 	ctx context.Context,
 	tableId string,
@@ -116,14 +102,12 @@ func (s *Proj3APIService) GetTableById(
     return Response(http.StatusOK, schema), nil
 }
 
-
-
 func (s *Proj3APIService) DeleteTable(ctx context.Context, tableId string) (ImplResponse, error) {
 	if _, err := s.ms.GetTableById(tableId); err != nil {
 		return Response(http.StatusNotFound, Error{Message: err.Error()}), nil
 	}
 
-	iq := internalQuery{
+	iq := &internalQuery{
 		ID: uuid.NewString(),
 		QueryDefinition: QueryQueryDefinition{
 			TableName: tableId,
@@ -137,34 +121,31 @@ func (s *Proj3APIService) DeleteTable(ctx context.Context, tableId string) (Impl
 		Finished:          nil,
 		Error:             nil,
 		ResultRows:        QueryResultInner{},
+		doneChan:          make(chan struct{}),
 	}
 
-	s.qs.add(&iq)
-	log.Println("Submitting delete table query", iq.string())
+	s.qs.add(iq)
+	// log.Println("Submitting delete table query", iq.string())
 	s.scheduler.SubmitQuery(iq.ID)
 
-	// TODO !!! cant just return need to wait for execution
-	type DeleteResponse struct {
-		Message string `json:"message"`
-		QueryID string `json:"queryId"`
+	// Wait for completion
+	<-iq.doneChan
+	
+	if iq.GetStatus() == FAILED {
+		return Response(http.StatusInternalServerError, Error{
+			Message: "Deletion failed",
+		}), nil
 	}
-
-	return Response(http.StatusOK, DeleteResponse{
-		Message: "Table deletion queued",
-		QueryID: iq.ID,
-	}), nil
+	return Response(http.StatusOK, "Table deleted"), nil
 }
-
-
-
-// CreateTable - Create new table in database
+// TODO has to create empty fiels
 func (s *Proj3APIService) CreateTable(
 	ctx context.Context,
 	tableSchema TableSchema,
 ) (ImplResponse, error) {
     name := tableSchema.Name
 
-    cols := make([]metastore.Column, 0, len(tableSchema.Columns))
+    cols := make([]metastore.Column, len(tableSchema.Columns))
     for i, c := range tableSchema.Columns {
         logicalType, err := convertTypeFromLogical(c.Type)
         if err != nil {
@@ -183,7 +164,6 @@ func (s *Proj3APIService) CreateTable(
     return Response(http.StatusOK, tableID), nil
 }
 
-//  GetQueries - Get list of queries (optional in project 3, but useful). Use those IDs to get details by calling /query endpoint.
 func (s *Proj3APIService) GetQueries(ctx context.Context) (ImplResponse, error) {
     items := s.qs.list()
     out := make([]ShallowQuery, len(items))
@@ -193,8 +173,6 @@ func (s *Proj3APIService) GetQueries(ctx context.Context) (ImplResponse, error) 
     return Response(http.StatusOK, out), nil
 }
 
-
-// GetQueryById - Get detailed status of selected query
 func (s *Proj3APIService) GetQueryById(
 	ctx context.Context,
 	queryId string,
@@ -206,9 +184,6 @@ func (s *Proj3APIService) GetQueryById(
     return Response(http.StatusOK, toPublic(iq)), nil
 }
 
-
-// TODO !!!!
-// SubmitQuery - Submit new query for execution
 func (s *Proj3APIService) SubmitQuery(
 	ctx context.Context,
 	executeQueryRequest ExecuteQueryRequest,
@@ -216,31 +191,24 @@ func (s *Proj3APIService) SubmitQuery(
 
 	qd := executeQueryRequest.QueryDefinition
 
-	// Validation:
-	// SELECT queries require TableName.
-	// LOAD queries require SourceFilepath and DestinationColumns.
 	isSelect := qd.TableName != ""
-	isLoad := qd.SourceFilepath != "" && len(qd.DestinationColumns) > 0
-
-
-	// TODO add validation of query 400 Cannot create query due to problems in request (or e.g. table in query doesn't exist)
+	isLoad := qd.SourceFilepath != "" && qd.DestinationTableName != ""
+		// TODO add validation of query 400 Cannot create query due to problems in request (or e.g. table in query doesn't exist)
 
 	if !isSelect && !isLoad {
 		return Response(
 			http.StatusBadRequest,
-			"Invalid query definition: either TableName for SELECT or SourceFilepath and DestinationColumns for LOAD must be provided",
+			"Invalid query definition: either TableName for SELECT or SourceFilepath and DestinationTableName for LOAD must be provided",
 		), nil
 	}
 
-	iq := internalQuery{
+	iq := &internalQuery{
 		ID:                uuid.NewString(),
 		QueryDefinition:   qd,
 		Status:            CREATED,
 		IsResultAvailable: false,
-		
 		IsSelect:          isSelect,
 		IsDelete:          false,
-
 		Submitted:         time.Now(),
 		Started:           nil,
 		Finished:          nil,
@@ -248,21 +216,15 @@ func (s *Proj3APIService) SubmitQuery(
 		ResultRows:        QueryResultInner{},
 	}
 
-	s.qs.add(&iq)
-
+	s.qs.add(iq)
 	s.scheduler.SubmitQuery(iq.ID)
-
-	type QueryCreated struct {
-		QueryID string `json:"queryId"`
-	}
 
 	return Response(
 		http.StatusOK,
-		QueryCreated{QueryID: iq.ID},
+		iq.ID,
 	), nil
 }
 
-// GetQueryResult - Get result of selected query (will be available only for SELECT queries after they are completed)
 func (s *Proj3APIService) GetQueryResult(ctx context.Context, queryId string, getQueryResultRequest GetQueryResultRequest) (ImplResponse, error) {
 	iq, ok := s.qs.get(queryId)
 	if !ok {
@@ -273,14 +235,39 @@ func (s *Proj3APIService) GetQueryResult(ctx context.Context, queryId string, ge
 		return Response(http.StatusBadRequest, Error{Message: "Result of this query is not available"}), nil
 	}
 
-	if !iq.IsResultAvailable {
+	if !iq.GetIsResultAvailable() {
 		return Response(http.StatusBadRequest, Error{Message: "Result of this query is not available"}), nil
 	}
 
-	return Response(http.StatusOK, iq.ResultRows), nil
+	resultRows := iq.GetResultRows()
+	var result QueryResultInner = resultRows
+	
+	if getQueryResultRequest.RowLimit > 0 {
+		limit := int(getQueryResultRequest.RowLimit)
+
+		if limit > int(resultRows.RowCount) {
+			limit = int(resultRows.RowCount)
+		}
+
+		result.Columns = make([]QueryResultInnerColumnsInner, len(resultRows.Columns))
+		for i := range resultRows.Columns {
+			if len(resultRows.Columns[i]) > limit {
+				result.Columns[i] = resultRows.Columns[i][:limit]
+			} else {
+				result.Columns[i] = resultRows.Columns[i]
+			}
+		}
+
+		result.RowCount = int32(limit)
+	}
+
+	if getQueryResultRequest.FlushResult {
+		iq.ClearResult()
+	}
+
+	return Response(http.StatusOK, result), nil
 }
 
-// GetQueryError - Get error of selected query (will be available only for queries in FAILED state)
 func (s *Proj3APIService) GetQueryError(ctx context.Context, queryId string) (ImplResponse, error) {
 
 	iq, ok := s.qs.get(queryId)
@@ -288,17 +275,15 @@ func (s *Proj3APIService) GetQueryError(ctx context.Context, queryId string) (Im
 		return Response(http.StatusNotFound, Error{Message: "Couldn't find a query of given ID"}), nil
 	}
 
-	if iq.Status != FAILED {
+	if iq.GetStatus() != FAILED {
 		return Response(http.StatusBadRequest, Error{Message: "Error for this query is not available"}), nil
 	}
 
-	return Response(http.StatusOK, iq.Error), nil
+	return Response(http.StatusOK, iq.GetError()), nil
 }
 
-// GetSystemInfo - Get basic information about the system (e.g. version, uptime, etc.)
 func (s *Proj3APIService) GetSystemInfo(ctx context.Context) (ImplResponse, error) {
 	sysInfo := s.si
-
 
 	return Response(http.StatusOK, SystemInformation{
 		InterfaceVersion: sysInfo.InterfaceVersion,

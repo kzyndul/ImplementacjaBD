@@ -13,7 +13,8 @@ const (
 	TypeString byte = 1
 	HeaderSize      = 13 // 1 + 4 + 8
 
-	BatchSize = 1
+	BatchSize = 8192
+	// BatchSize = 1
 )
 
 type ColumnFileHeader struct {
@@ -43,6 +44,7 @@ type Batch struct {
 }
 
 func NewSerializer(tablePath string, numRows int32, numColumns int32) (*Serializer, error) {
+	// log.Printf("Creating serializer for table path: %s", tablePath)
 	if err := os.MkdirAll(tablePath, 0755); err != nil {
 		return nil, err
 	}
@@ -55,6 +57,7 @@ func NewSerializer(tablePath string, numRows int32, numColumns int32) (*Serializ
 }
 
 func (s *Serializer) WriteBatch(batchIndex int, batch *Batch) error {
+	// log.Println("Writing batch1:", batch)
 	for colIdx := int32(0); colIdx < batch.NumColumns; colIdx++ {
 		if err := s.writeColumnBatch(colIdx, batchIndex, batch); err != nil {
 			return fmt.Errorf("failed to write column %d: %w", colIdx, err)
@@ -66,6 +69,7 @@ func (s *Serializer) WriteBatch(batchIndex int, batch *Batch) error {
 func (s *Serializer) writeColumnBatch(colIdx int32, batchIndex int, batch *Batch) error {
 	columnFile := filepath.Join(s.tablePath, fmt.Sprintf("column_%d.dat", colIdx))
 
+	// log.Println("Writing batch2:", batch)
 	// Check if file exists
 	fileExists := false
 	if _, err := os.Stat(columnFile); err == nil {

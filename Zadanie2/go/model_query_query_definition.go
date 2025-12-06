@@ -18,9 +18,9 @@ type QueryQueryDefinition struct {
 	TableName string `json:"tableName,omitempty"`
 
 	// Path to source CSV file (filepath in perspective of running server! NOT client)
-	SourceFilepath string `json:"sourceFilepath"`
+	SourceFilepath string `json:"sourceFilepath,omitempty"`
 
-	DestinationTableName string `json:"destinationTableName"`
+	DestinationTableName string `json:"destinationTableName,omitempty"`
 
 	// List of columns to copy data into. It creates a map from source columns to destination columns. Assumes that data in source file is in the same order as in this list.
 	DestinationColumns []string `json:"destinationColumns,omitempty"`
@@ -31,15 +31,15 @@ type QueryQueryDefinition struct {
 
 // AssertQueryQueryDefinitionRequired checks if the required fields are not zero-ed
 func AssertQueryQueryDefinitionRequired(obj QueryQueryDefinition) error {
-	elements := map[string]interface{}{
-		"sourceFilepath": obj.SourceFilepath,
-		"destinationTableName": obj.DestinationTableName,
-	}
-	for name, el := range elements {
-		if isZero := IsZeroValue(el); isZero {
-			return &RequiredError{Field: name}
-		}
-	}
+	// elements := map[string]interface{}{
+	// 	"sourceFilepath": obj.SourceFilepath,
+	// 	"destinationTableName": obj.DestinationTableName,
+	// }
+	// for name, el := range elements {
+	// 	if isZero := IsZeroValue(el); isZero {
+	// 		return &RequiredError{Field: name}
+	// 	}
+	// }
 
 	return nil
 }

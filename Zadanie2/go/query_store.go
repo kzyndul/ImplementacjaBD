@@ -8,19 +8,81 @@ import (
 )
 
 type internalQuery struct {
-	ID                string
-	QueryDefinition   QueryQueryDefinition
+	ID              string
+	QueryDefinition QueryQueryDefinition
+
+	// Immutable fields (set at creation, never modified)
+	IsSelect  bool
+	IsDelete  bool
+	Submitted time.Time
+
+	// Mutable fields (protected by mu)
 	Status            QueryStatus
 	IsResultAvailable bool
+	Started           *time.Time
+	Finished          *time.Time
+	Error             *MultipleProblemsError
+	ResultRows        QueryResultInner
 
-	IsSelect bool
-	IsDelete bool
+	doneChan chan struct{}
+	mu       sync.RWMutex
+}
 
-	Submitted  time.Time
-	Started    *time.Time
-	Finished   *time.Time
-	Error      *MultipleProblemsError // TODO what to do here
-	ResultRows QueryResultInner       // TODO what to do here
+// Thread-safe getters
+func (iq *internalQuery) GetStatus() QueryStatus {
+	iq.mu.RLock()
+	defer iq.mu.RUnlock()
+	return iq.Status
+}
+
+func (iq *internalQuery) GetIsResultAvailable() bool {
+	iq.mu.RLock()
+	defer iq.mu.RUnlock()
+	return iq.IsResultAvailable
+}
+
+func (iq *internalQuery) GetResultRows() QueryResultInner {
+	iq.mu.RLock()
+	defer iq.mu.RUnlock()
+	return iq.ResultRows
+}
+
+func (iq *internalQuery) GetError() *MultipleProblemsError {
+	iq.mu.RLock()
+	defer iq.mu.RUnlock()
+	return iq.Error
+}
+
+// Thread-safe setters
+func (iq *internalQuery) SetRunning(started time.Time) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	iq.Status = RUNNING
+	iq.Started = &started
+}
+
+func (iq *internalQuery) SetCompleted(finished time.Time, rows QueryResultInner, isResultAvailable bool) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	iq.Status = COMPLETED
+	iq.Finished = &finished
+	iq.ResultRows = rows
+	iq.IsResultAvailable = isResultAvailable
+}
+
+func (iq *internalQuery) SetFailed(finished time.Time, err *MultipleProblemsError) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	iq.Status = FAILED
+	iq.Finished = &finished
+	iq.Error = err
+}
+
+func (iq *internalQuery) ClearResult() {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	iq.IsResultAvailable = false
+	iq.ResultRows = QueryResultInner{}
 }
 
 type queryStore struct {
@@ -31,16 +93,17 @@ type queryStore struct {
 func (query QueryQueryDefinition) string() string {
 	var sb strings.Builder
 	sb.WriteString("[Table=" + query.TableName)
-	sb.WriteString(", Type=DestinationColumns=[" + strings.Join(query.DestinationColumns, ", ") + "]")
-	sb.WriteString(", Type=SourceFilepath=" + query.SourceFilepath)
-	sb.WriteString(", Type=LOAD, DestinationColumns=[" + strings.Join(query.DestinationColumns, ", ") + "]")
-	sb.WriteString(", Type=DestinationTableName=" + query.DestinationTableName)
+	sb.WriteString(", DestinationColumns=[" + strings.Join(query.DestinationColumns, ", ") + "]")
+	sb.WriteString(", SourceFilepath=" + query.SourceFilepath)
+	sb.WriteString(", DestinationTableName=" + query.DestinationTableName)
 	sb.WriteString("]")
 	return sb.String()
 }
 
-func (iq internalQuery) string() string {
-	return "Query[ID=" + iq.ID + ", Status=" + string(iq.Status) + iq.QueryDefinition.string() + " isSelect=" + strconv.FormatBool(iq.IsSelect) + ", isDelete=" + strconv.FormatBool(iq.IsDelete) + "]"
+func (iq *internalQuery) string() string {
+	status := iq.GetStatus()
+	return "Query[ID=" + iq.ID + ", Status=" + string(status) + iq.QueryDefinition.string() +
+		" isSelect=" + strconv.FormatBool(iq.IsSelect) + ", isDelete=" + strconv.FormatBool(iq.IsDelete) + "]"
 }
 
 func newQueryStore() *queryStore {
@@ -73,15 +136,15 @@ func (qs *queryStore) list() []*internalQuery {
 func toShallow(q *internalQuery) ShallowQuery {
 	return ShallowQuery{
 		QueryId: q.ID,
-		Status:  q.Status,
+		Status:  q.GetStatus(),
 	}
 }
 
 func toPublic(q *internalQuery) Query {
 	return Query{
 		QueryId:           q.ID,
-		Status:            q.Status,
-		IsResultAvailable: q.IsResultAvailable,
+		Status:            q.GetStatus(),
+		IsResultAvailable: q.GetIsResultAvailable(),
 		QueryDefinition:   q.QueryDefinition,
 	}
 }

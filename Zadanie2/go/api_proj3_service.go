@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-
 	"github.com/google/uuid"
 )
 
@@ -124,6 +123,7 @@ func (s *Proj3APIService) DeleteTable(ctx context.Context, tableId string) (Impl
 		doneChan:          make(chan struct{}),
 	}
 
+
 	s.qs.add(iq)
 	// log.Println("Submitting delete table query", iq.string())
 	s.scheduler.SubmitQuery(iq.ID)
@@ -157,7 +157,7 @@ func (s *Proj3APIService) CreateTable(
         }
     }
 
-	tableID, err := s.ms.CreateTable(name, cols, name)
+	tableID, err := s.ms.CreateTable(name, cols, s.scheduler.dataDir)
 	if err != nil {
 		return Response(http.StatusBadRequest, fmt.Sprintf("failed to create table '%s': %v", name, err)), nil
 	}
@@ -193,13 +193,32 @@ func (s *Proj3APIService) SubmitQuery(
 
 	isSelect := qd.TableName != ""
 	isLoad := qd.SourceFilepath != "" && qd.DestinationTableName != ""
-		// TODO add validation of query 400 Cannot create query due to problems in request (or e.g. table in query doesn't exist)
 
 	if !isSelect && !isLoad {
 		return Response(
 			http.StatusBadRequest,
 			"Invalid query definition: either TableName for SELECT or SourceFilepath and DestinationTableName for LOAD must be provided",
 		), nil
+	}
+
+	if isLoad {
+		_, err := s.ms.GetTableByName(qd.DestinationTableName)
+		if err != nil {
+			return Response(
+				http.StatusBadRequest,
+				fmt.Sprintf("Invalid query definition: destination table '%s' does not exist", qd.DestinationTableName),
+			), nil
+		}
+	}
+
+	if isSelect {
+		_, err := s.ms.GetTableByName(qd.TableName)
+		if err != nil {
+			return Response(
+				http.StatusBadRequest,
+				fmt.Sprintf("Invalid query definition: table '%s' does not exist", qd.TableName),
+			), nil
+		}
 	}
 
 	iq := &internalQuery{

@@ -1,57 +1,100 @@
 # Implementacja systemów baz danych
-<b> Rozwiązanie drugiego zadania z ISBD MIMUW 2025 </b> <br />
-<b> Autor: Krzysztof Żyndul </b>
+**Rozwiązanie drugiego zadania z ISBD MIMUW 2025**  
+**Autor: Krzysztof Żyndul**
 
 ## Kompilacja i uruchomienie
-go build
 
-./Zadanie2 <table_folder>
+### Lokalne uruchomienie
+```bash
+make build
+./dbms
+```
 
+### Docker
+```bash
+make docker
+docker run -d -p 8080:8080 -v $(pwd)/data:/data dbms:latest
+```
 
+Aplikacja będzie dostępna pod adresem `http://localhost:8080`, a interfejs Swagger UI pod `http://localhost:8080/docs`.
 
-## Kompresja danych
-1. Kompresja wartości całkowitych (int64)
-  - Delta encoding
-  - Variable-length encoding
+## Architektura systemu
 
-2. Kompresja tablic napisów
-Tablice napisów są kompresowane w kilku krokach:
-  - Wszystkie elementy tablicy są konkatenowane w jeden długi ciąg znaków.
-  - Tworzona jest tablica offsetów, określająca, gdzie zaczyna się i kończy każdy oryginalny napis.
-  - Skonkatenowany ciąg znaków jest kompresowany algorytmem LZ4.
+### Struktura katalogów
+```
+.
+├── data/               # Dane tabel (katalog dla każdej tabeli)
+│   └── <table_name>/
+│       └── column_*.dat
+├── metastore.json      # Metadane tabel (schematy, typy kolumn)
+├── main.go             # Główny plik aplikacji
+├── metastore/          # Moduł zarządzający metadanymi i dostępem do tabel
+├── go/                 # Pliki wygenerowane przez OpenAPI Generator
+└── deserializer/       # Moduł implementujący serializację i deserializację
+```
 
+### Komponenty systemu
 
-## Format pliku
-Każdy plik danych składa się z czterech części:
+#### 1. Metastore (`metastore/`)
+Zarządza metadanymi tabel:
+- Schematy tabel (nazwy, kolumny, typy)
+- Mapowanie nazw kolumn na indeksy
+- Ścieżki do plików danych
+- Timestamps (utworzenie, ostatnia modyfikacja)
+- Blokady read/write na tabelach (RWMutex)
 
-1. Nagłówek pliku - podstawowe metadane: 
-    - BatchSize – liczba wierszy,
-    - NumColumns - liczba kolumn,
-    - FooterOffset - offset, pozycja w bajtach, w którym zaczyna się stopka pliku.
+Dane przechowywane w `metastore.json`, ładowane przy starcie i zapisywane przy zamknięciu.
 
+#### 2. API
+API zostało wygenerowane przy użyciu **OpenAPI Generator** na podstawie specyfikacji w pliku `dbmsInterface.yaml`. Główne pliki to:
+- `api_proj3_service.go` - implementacja endpointów API
+- `scheduler.go` - harmonogramowanie i wykonywanie zapytań
+- `query_store.go` - przechowywanie stanu zapytań
 
-2. Dane - dane są przechowywane w postaci tablicy dwuwymiarowej, w której:
-    - każdy wiersz odpowiada kolumnie w tabeli,
-    - wszystkie dane numeryczne (int64) są skompresowane przy użyciu variable-length encoding oraz delta encoding.
-    - dla kolumn tekstowych tablica zawiera BatchSize + 1 elementów (offsety początków i końców napisów).
+#### 3. Query Scheduler (`scheduler.go`)
+- Obsługuje zapytania asynchronicznie, wysyłając je do workerów
+- Implementuje wykonanie zapytań
 
-3. Stopka pliku - metadane opisujące kolumny, ich typy, lokalizację oraz informacje o kompresji:
-    - DeltaDelta       int64	wartość do dekodowania tablicy ColumnsDelta,
-    - DeltaOffset	    int64	wartość do dekodowania tablicy ColumnsOffset,
-    - Offset1	        int64	offset końca tablicy ColumnsType,
-    - Offset2	        int64	offset końca tablicy ColumnsDelta,
-    - StringOffset	    int64	offset końca tablicy ColumnsOffset = początku skompresowanych napisów,
-    - StringSize	    int64	rozmiar skompresowanego ciągu znaków,
-    - ColumnsType	    []byte	typy każdej z kolumn, 
-    - ColumnsDelta	    []int64	wartość do dekodowania każdej z kolumn kolumny,
-    - ColumnsOffset	[]int64	offset gdzie dana kolumna się zaczyna (BatchSize + 1).
+#### 4. Query Store (`query_store.go`)
+- Przechowuje listę wszystkich zapytań
+- Wyniki zapytań przechowywane są w pamięci
 
-4. Skompresowany string, który jest konkatenacją wszystkich napisów ze wszystkich kolumn. Ten ciąg znaków jest kompresowany przy użyciu LZ4, aby zminimalizować rozmiar pliku.
+#### 5. Serializer/Deserializer (`deserializer/`)
+Odpowiada za zapis i odczyt danych:
+- **Serializer**: zapisuje dane w batchach do plików `column_*.dat`
+- **Deserializer**: odczytuje i dekompresuje dane z plików
 
-## Batch
-Struktura batcha:
- - BatchSize    int32       ilość wierszy w batchu,
- - NumColumns   int32       ilość kolumn w batchu,
- - ColumnTypes  []byte      tyo każdej z kolumny,
- - Data         [][]int64   dane dla każdej z kolumn,
- - String       string      skonkatenowany wszystkie napsiy z kazdej z kolumn.
+## Format danych
+
+### Batch
+Dane przetwarzane w batchach po **8192 wiersze**:
+```go
+type Batch struct {
+    BatchSize   int32           // Liczba wierszy
+    NumColumns  int32           // Liczba kolumn
+    ColumnTypes []byte          // Typ każdej kolumny (0=int, 1=string)
+    Data        [][]int64       // Dane kolumnowe
+    String      map[int]string  // Skonkatenowane stringi dla kolumn tekstowych
+}
+```
+
+### Struktura pliku `column_*.dat`
+Każda kolumna jest przechowywana w oddzielnym pliku. Każdy plik składa się z:
+
+1. **Header (13 bajtów)**
+   - `ColumnType` (1 byte): 0=int, 1=string
+   - `NumBatches` (4 bytes): liczba batchy w pliku
+   - `FooterOffset` (8 bytes): offset do footera
+
+2. **Batche**
+   - Skompresowane dane int64 (delta + variable-length encoding)
+   - Dla stringów dodatkowo skompresowane (LZ4) stringi
+
+3. **Footer**
+   - `BatchOffsets[]`: gdzie zaczyna się każdy batch
+   - `BatchDeltas[]`: wartości delta dla dekompresji
+   - `StringSizes[]`: rozmiary skompresowanych stringów
+
+# Znane ograniczenia
+
+**RWMutex w Go nie gwarantuje sprawiedliwości** - pisarze mogą głodzić czytelników, a wątki nie są kolejkowane w kolejce FIFO. **Kolejność wykonania zapytań może różnić się od kolejności ich przyjęcia do systemu.**

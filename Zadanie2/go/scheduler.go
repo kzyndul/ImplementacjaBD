@@ -122,7 +122,6 @@ func (sched *QueryScheduler) executeQuery(workerID int, queryID string) {
 // executeSelect handles SELECT query execution
 func (sched *QueryScheduler) executeSelect(iq *internalQuery) (QueryResultInner, error) {
 	tableName := iq.QueryDefinition.TableName
-	// TODO check table existence erlier
 	// log.Printf("Executing SELECT on table %s", tableName)
 	table, err := sched.ms.GetTableByName(tableName)
 	if err != nil {
@@ -153,16 +152,16 @@ func (sched *QueryScheduler) readTableData(table *metastore.Table, dataFiles []s
 
 	des, err := deserializer.NewBatchDeserializer(tablePath)
 	if err != nil {
-		if err.Error() == "no column files found" {
-			return allRows, nil
-		}
-		return QueryResultInner{}, fmt.Errorf("failed to create deserializer: %w", err)
+		return allRows, fmt.Errorf("failed to create deserializer: %w", err)
 	}
 
 	ints, stringsMap, err := des.ReadTableData()
 	if err != nil {
+		if err.Error() == "no column files found" {
+			return allRows, nil
+		}
 		// log.Println("Error reading table data:", err)
-		return QueryResultInner{}, fmt.Errorf("failed to read file: %w", err)
+		return allRows, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	if len(ints) > 0 && len(ints[0]) > 0 {

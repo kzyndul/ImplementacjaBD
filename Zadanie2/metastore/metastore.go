@@ -217,6 +217,11 @@ func (m *Metastore) CreateTable(name string, columns []Column, dataDir string) (
 		LastModified:  now,
 	}
 
+	err := os.MkdirAll(filepath.Join(dataDir, name), 0755)
+	if err != nil {
+		return "", fmt.Errorf("failed to create table directory: %w", err)
+	}
+
 	// set column paths based on dataDir
 	// TODO
 	for idx, col := range columns {

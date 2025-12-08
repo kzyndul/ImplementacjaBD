@@ -2,7 +2,6 @@ package utils
 
 import "fmt"
 
-// TODO uints?
 func VariableLengthEncode(integers []int64) []byte {
 	result := make([]byte, 0, len(integers)*2)
 
@@ -26,7 +25,6 @@ func VariableLengthEncode(integers []int64) []byte {
 	return result
 }
 
-// TODO uints?
 func VariableLengthDecode(data []byte) []int64 {
 	result := make([]int64, 0)
 	var current int64

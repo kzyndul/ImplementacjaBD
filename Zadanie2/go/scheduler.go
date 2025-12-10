@@ -242,7 +242,10 @@ func (sched *QueryScheduler) loadCSVData(
 	}
 
 	// log.Printf("Building column mapping for table %s", tableName)
-	colMapping := sched.buildColumnMapping(csvHeader, table, destCols, hasHeader)
+	colMapping, err := sched.buildColumnMapping(csvHeader, table, destCols, hasHeader)
+	if err != nil {
+		return 0, err
+	}
 
 	// log.Println("Column mapping:", colMapping)
 	numCols := len(table.Columns)
@@ -252,6 +255,19 @@ func (sched *QueryScheduler) loadCSVData(
 	records, err := reader.ReadAll()
 	if err != nil {
 		return 0, fmt.Errorf("failed to read CSV row: %w", err)
+	}
+
+	if len(records) == 0 {
+		return 0, nil
+	}
+
+	numCSVCols := len(records[0])
+	if len(destCols) == 0 && numCSVCols != numCols {
+		return 0, fmt.Errorf("CSV has %d columns but table has %d columns", numCSVCols, numCols)
+	}
+
+	if len(destCols) != 0 && len(destCols) != numCSVCols {
+		return 0, fmt.Errorf("CSV has %d columns but destinationColumns has %d columns", numCSVCols, len(destCols))
 	}
 
 	for rowCount < len(records) {
@@ -270,6 +286,7 @@ func (sched *QueryScheduler) loadCSVData(
 
 				colType := table.Columns[tableColIdx].Type
 
+				// log.Println("Parsing value", strVal, "as type", colType, " tableColIdx ", tableColIdx)
 				parsedVal, err := sched.parseValue(strVal, colType)
 				if err != nil {
 					return rowCount, fmt.Errorf("failed to parse value '%s' for column '%s': %w", strVal, table.Columns[tableColIdx].Name, err)
@@ -344,26 +361,34 @@ func (sched *QueryScheduler) buildColumnMapping(
 	table *metastore.Table,
 	destCols []string,
 	hasHeader bool,
-) map[int]int {
+) (map[int]int, error) {
 	if len(destCols) == 0 {
 		mapping := make(map[int]int)
 		for i := 0; i < len(table.Columns); i++ {
 			mapping[i] = i
 		}
-		return mapping
+		return mapping, nil
 	}
 
 	mapping := make(map[int]int)
 
+	hit := 0
 	for csvIdx, mapsTo := range destCols {
 		_, ok := table.ColumnMapping[mapsTo]
 		if ok {
 			mapping[csvIdx] = table.ColumnMapping[mapsTo]
+			hit += 1
 			continue
 		}
 	}
 
-	return mapping
+	if hit != len(table.Columns) {
+		return mapping, fmt.Errorf("the provided destinationColumns do not cover all table columns")
+	}
+
+	// log.Println("mapping built:", mapping)
+
+	return mapping, nil
 }
 
 func (sched *QueryScheduler) executeDelete(iq *internalQuery) error {

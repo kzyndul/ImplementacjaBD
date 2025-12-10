@@ -98,3 +98,7 @@ Każda kolumna jest przechowywana w oddzielnym pliku. Każdy plik składa się z
 # Znane ograniczenia
 
 **RWMutex w Go nie gwarantuje sprawiedliwości** - pisarze mogą głodzić czytelników, a wątki nie są kolejkowane w kolejce FIFO. **Kolejność wykonania zapytań może różnić się od kolejności ich przyjęcia do systemu.**
+
+## destinationColumns
+
+Parametr ten zinterpretowałme w następujący sposób. Niech plik źródłowy CSV am n kolumn, wted destinationColumns powinna mieć n wartości. Jeżeli i-tą wartością parametru destinationColumns jest nazwa j-otej kolumny tabeli docelowej oznacza to, że i-ta kolumna powinna pliku CSV być zmapowana na j-tą kolumne tabeli.     
